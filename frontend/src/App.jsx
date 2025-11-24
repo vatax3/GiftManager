@@ -123,6 +123,18 @@ const mapProjectFromApi = (proj) => {
       involved: e.involved || [],
       beneficiary: e.beneficiary || '',
       receiver: e.receiver || null
+    })),
+    subEvents: (proj.sub_events || proj.subEvents || []).map(se => ({
+      ...se,
+      contributions: (se.contributions || []).map(c => ({
+        member: c.member,
+        amount: parseFloat(c.amount) || 0
+      })),
+      items: (se.items || []).map(it => ({
+        ...it,
+        amount: parseFloat(it.amount) || 0,
+        isBought: it.isBought ?? it.is_bought ?? false
+      }))
     }))
   };
 };
@@ -156,13 +168,12 @@ export default function App() {
 
   // --- PROJECT INTERNAL STATE ---
   const [projView, setProjView] = useState('LIST'); 
-  const [newExpense, setNewExpense] = useState({ title: '', amount: '', payer: '', beneficiary: '', involved: [], shares: {}, customSplit: false });
+  const [subEventForm, setSubEventForm] = useState({ id: null, title: '', beneficiary: '', buyer: '', contributions: {}, items: [], created_at: '' });
+  const [itemDraft, setItemDraft] = useState({ title: '', amount: '' });
   const [customInput, setCustomInput] = useState({ field: null, value: '' });
-  const [isAddingInvolved, setIsAddingInvolved] = useState(false);
-  const [newInvolvedName, setNewInvolvedName] = useState('');
-  const [editingId, setEditingId] = useState(null);
+  const [editingSubEventId, setEditingSubEventId] = useState(null);
   const [newSettlement, setNewSettlement] = useState({ amount: '', receiver: '' });
-  const [flowFilter, setFlowFilter] = useState('all'); // all | expense | settlement
+  const [flowFilter, setFlowFilter] = useState('all'); // all | sub | settlement
 
   // --- DATA LOADING ---
   useEffect(() => {
@@ -190,6 +201,14 @@ export default function App() {
       };
       loadProjectsMeta();
   }, [globalUser?.id, globalUser?.myProjectCodes?.join(',')]);
+
+  useEffect(() => {
+      if (!currentUserMemberName) return;
+      setSubEventForm(prev => {
+          if (prev.buyer) return prev;
+          return { ...prev, buyer: currentUserMemberName };
+      });
+  }, [currentUserMemberName]);
 
   // --- 1. AUTHENTICATION LOGIC ---
 
@@ -353,7 +372,7 @@ export default function App() {
               setCurrentUserMemberName(linkedMember.name);
               setView('PROJECT_HOME');
               setProjView('LIST');
-              setNewExpense({ title: '', amount: '', payer: linkedMember.name, beneficiary: '', involved: [], shares: {}, customSplit: false });
+              resetSubEventForm(linkedMember.name, normalizedProject);
           } else {
               setView('PROJECT_LINK');
           }
@@ -378,7 +397,7 @@ export default function App() {
           setCurrentUserMemberName(memberName);
           setView('PROJECT_HOME');
           setProjView('LIST');
-          setNewExpense({ title: '', amount: '', payer: memberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
+          resetSubEventForm(memberName);
       } catch (err) {
           alert(err.message || "Impossible de lier ce membre");
       }
@@ -386,10 +405,18 @@ export default function App() {
 
   // --- 4. PROJECT INTERNAL LOGIC ---
 
+  const refreshActiveProject = async () => {
+      if (!activeProject?.code) return;
+      const refreshed = await api.getProject(activeProject.code);
+      const normalized = mapProjectFromApi(refreshed);
+      setActiveProject(normalized);
+      setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+  };
+
   const addProjectMember = (name) => {
       if (!name) return;
       if (activeProject.members.find(m => normalize(m.name) === normalize(name))) {
-          alert("Ce membre existe déjà !");
+          alert("Ce membre existe deja !");
           return;
       }
       const updatedProject = {
@@ -401,119 +428,147 @@ export default function App() {
       return name;
   };
 
-  const confirmCustomMember = (field) => {
-      const name = customInput.value;
-      if (!name) return;
-      
-      addProjectMember(name);
-      
-      setNewExpense(prev => {
-          const newState = { ...prev, [field]: name };
-          if (field === 'beneficiary') {
-               const defaultInvolved = activeProject.members.map(m => m.name).concat(name).filter(n => n !== name);
-               newState.involved = defaultInvolved;
-               if (prev.customSplit) {
-                   const shares = {};
-                   defaultInvolved.forEach(n => { shares[n] = prev.shares?.[n] || 1; });
-                   newState.shares = shares;
-               }
+  const prepareContributionMap = (beneficiary, currentMap = {}, projectOverride = null) => {
+      const map = {};
+      const members = projectOverride?.members || activeProject?.members || [];
+      members.forEach(m => {
+          if (m.name !== beneficiary) {
+              map[m.name] = currentMap[m.name] ?? '';
           }
-          return newState;
       });
+      return map;
+  };
+
+  const resetSubEventForm = (buyerName, projectOverride = null) => {
+      const proj = projectOverride || activeProject;
+      const members = proj?.members || activeProject?.members || [];
+      const defaultBuyer = buyerName || currentUserMemberName || (members?.[0]?.name || '');
+      setSubEventForm({
+          id: null,
+          title: '',
+          beneficiary: '',
+          buyer: defaultBuyer,
+          contributions: prepareContributionMap('', {}, proj),
+          items: [],
+          created_at: new Date().toISOString()
+      });
+      setItemDraft({ title: '', amount: '' });
+      setCustomInput({ field: null, value: '' });
+      setEditingSubEventId(null);
+  };
+
+  const confirmCustomMember = (field) => {
+      const name = customInput.value?.trim();
+      if (!name) return;
+      const added = addProjectMember(name);
+      if (!added) {
+          setCustomInput({ field: null, value: '' });
+          return;
+      }
+      if (field === 'beneficiary') {
+          setSubEventForm(prev => ({
+              ...prev,
+              beneficiary: name,
+              contributions: prepareContributionMap(name, prev.contributions)
+          }));
+      } else if (field === 'buyer') {
+          setSubEventForm(prev => ({ ...prev, buyer: name }));
+      } else if (field === 'contributor') {
+          setSubEventForm(prev => ({ ...prev, contributions: { ...prev.contributions, [name]: '' } }));
+      }
       setCustomInput({ field: null, value: '' });
   };
 
+  const startEditSubEvent = (subEvent) => {
+      const mappedContribs = {};
+      (subEvent.contributions || []).forEach(c => { mappedContribs[c.member] = c.amount?.toString() || ''; });
+      setSubEventForm({
+          id: subEvent.id,
+          title: subEvent.title || '',
+          beneficiary: subEvent.beneficiary || '',
+          buyer: subEvent.buyer || currentUserMemberName || '',
+          contributions: prepareContributionMap(subEvent.beneficiary || '', mappedContribs),
+          items: (subEvent.items || []).map(it => ({
+              id: it.id || generateId(),
+              title: it.title || '',
+              amount: it.amount ?? 0,
+              isBought: !!it.isBought
+          })),
+          created_at: subEvent.created_at || new Date().toISOString()
+      });
+      setEditingSubEventId(subEvent.id);
+      setItemDraft({ title: '', amount: '' });
+      setProjView('ADD');
+  };
 
-  const saveExpense = async () => {
-      if (!newExpense.title || !newExpense.amount || !newExpense.payer || !newExpense.beneficiary) return;
-  
-      let updatedProject = { ...activeProject };
-
-      let involvedList = newExpense.involved;
-      if (involvedList.length === 0) {
-         involvedList = updatedProject.members
-           .filter(m => m.name !== newExpense.beneficiary)
-           .map(m => m.name);
-      }
-
-      let sharesToSave = {};
-      if (newExpense.customSplit) {
-          const hasDefinedShares = newExpense.shares && Object.keys(newExpense.shares).length > 0;
-          if (!hasDefinedShares) {
-              involvedList.forEach(n => { sharesToSave[n] = 1; });
-          } else {
-              involvedList.forEach(n => {
-                  const val = parseFloat(newExpense.shares?.[n]);
-                  if (!isNaN(val) && val > 0) sharesToSave[n] = val;
-              });
-          }
-          const totalWeight = Object.values(sharesToSave).reduce((a, b) => a + b, 0);
-          if (!Object.keys(sharesToSave).length || totalWeight <= 0) {
-              alert("Merci de definir une repartition valide (parts > 0).");
-              return;
-          }
-      }
-  
-      const expenseData = {
-        id: editingId || generateId(),
-        type: 'expense',
-        title: newExpense.title,
-        amount: parseFloat(newExpense.amount),
-        payer: newExpense.payer,
-        beneficiary: newExpense.beneficiary,
-        involved: involvedList,
-        shares: newExpense.customSplit ? sharesToSave : undefined,
-        isBought: editingId ? activeProject.expenses.find(e => e.id === editingId)?.isBought : false,
-        date: new Date().toISOString()
-      };
-  
-      try {
-          const payload = { ...expenseData, is_bought: expenseData.isBought };
-          delete payload.isBought;
-          await api.saveExpense(activeProject.code, payload);
-          const refreshed = await api.getProject(activeProject.code);
-          const normalized = mapProjectFromApi(refreshed);
-          setActiveProject(normalized);
-          setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
-      } catch (err) {
-          alert(err.message || "Impossible d'enregistrer la dépense");
+  const addItemToForm = () => {
+      if (!itemDraft.title || !itemDraft.amount) return;
+      const amount = parseFloat(itemDraft.amount);
+      if (isNaN(amount) || amount <= 0) {
+          alert("Montant invalide pour l'item.");
           return;
       }
-      
-      setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
-      setCustomInput({ field: null, value: '' });
-      setEditingId(null);
+      setSubEventForm(prev => ({
+          ...prev,
+          items: [...(prev.items || []), { id: generateId(), title: itemDraft.title, amount, isBought: false }]
+      }));
+      setItemDraft({ title: '', amount: '' });
+  };
+
+  const removeItemFromForm = (id) => {
+      setSubEventForm(prev => ({ ...prev, items: (prev.items || []).filter(it => it.id !== id) }));
+  };
+
+  const saveSubEvent = async () => {
+      if (!subEventForm.title || !subEventForm.buyer || !subEventForm.beneficiary) return;
+      const contributions = Object.entries(subEventForm.contributions || {})
+        .map(([member, val]) => ({ member, amount: parseFloat(val) }))
+        .filter(c => !isNaN(c.amount) && c.amount > 0);
+      if (contributions.length === 0) {
+          alert("Ajoute au moins un budget positif.");
+          return;
+      }
+      const itemsToSave = (subEventForm.items || [])
+        .map(it => ({ ...it, amount: parseFloat(it.amount) || 0, is_bought: !!it.isBought }))
+        .filter(it => it.title && it.amount > 0);
+      const payload = {
+          id: editingSubEventId || subEventForm.id || generateId(),
+          title: subEventForm.title,
+          beneficiary: subEventForm.beneficiary,
+          buyer: subEventForm.buyer,
+          contributions,
+          items: itemsToSave,
+          created_at: subEventForm.created_at || new Date().toISOString()
+      };
+      try {
+          await api.saveSubEvent(activeProject.code, payload);
+          await refreshActiveProject();
+      } catch (err) {
+          alert(err.message || "Impossible d'enregistrer le sous-evenement");
+          return;
+      }
+      resetSubEventForm();
       setProjView('LIST');
   };
 
-  const handleEdit = (expense) => {
-    setNewExpense({
-        title: expense.title,
-        amount: expense.amount,
-        payer: expense.payer,
-        beneficiary: expense.beneficiary,
-        involved: expense.involved || [],
-        shares: expense.shares || {},
-        customSplit: !!(expense.shares && Object.keys(expense.shares).length)
-    });
-    setEditingId(expense.id);
-    setProjView('ADD');
-  };
-
-  const toggleBought = (id) => {
-      const updatedProject = { ...activeProject };
-      updatedProject.expenses = updatedProject.expenses.map(e => e.id === id ? { ...e, isBought: !e.isBought } : e);
-      setActiveProject(updatedProject);
-      const expense = updatedProject.expenses.find(e => e.id === id);
-      if (expense) {
-          const payload = { ...expense, is_bought: expense.isBought };
-          delete payload.isBought;
-          api.saveExpense(activeProject.code, payload).then(async () => {
-              const refreshed = await api.getProject(activeProject.code);
-              const normalized = mapProjectFromApi(refreshed);
-              setActiveProject(normalized);
-              setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
-          }).catch(() => {});
+  const toggleSubEventItem = async (subEventId, itemId) => {
+      const sub = activeProject.subEvents.find(se => se.id === subEventId);
+      if (!sub) return;
+      const updatedItems = (sub.items || []).map(it => it.id === itemId ? { ...it, isBought: !it.isBought } : it);
+      const payload = {
+          id: sub.id,
+          title: sub.title,
+          beneficiary: sub.beneficiary,
+          buyer: sub.buyer,
+          contributions: (sub.contributions || []).map(c => ({ member: c.member, amount: c.amount })),
+          items: updatedItems.map(it => ({ ...it, amount: parseFloat(it.amount) || 0, is_bought: it.isBought })),
+          created_at: sub.created_at || new Date().toISOString()
+      };
+      try {
+          await api.saveSubEvent(activeProject.code, payload);
+          await refreshActiveProject();
+      } catch (err) {
+          alert(err.message || "Impossible de mettre a jour l'item");
       }
   };
 
@@ -529,10 +584,7 @@ export default function App() {
     try {
         const payload = { ...settlement, is_bought: false };
         await api.saveExpense(activeProject.code, payload);
-        const refreshed = await api.getProject(activeProject.code);
-        const normalized = mapProjectFromApi(refreshed);
-        setActiveProject(normalized);
-        setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+        await refreshActiveProject();
     } catch (err) {
         alert(err.message || "Impossible d'ajouter le remboursement");
         return;
@@ -541,7 +593,7 @@ export default function App() {
   };
 
   const quickSettle = async (from, to, amount) => {
-    if (!confirm(`Confirmer le remboursement de ${amount}€ ?`)) return;
+    if (!confirm(`Confirmer le remboursement de ${amount} EUR ?`)) return;
     const settlement = {
       id: generateId(),
       type: 'settlement',
@@ -553,54 +605,56 @@ export default function App() {
     try {
         const payload = { ...settlement, is_bought: false };
         await api.saveExpense(activeProject.code, payload);
-        const refreshed = await api.getProject(activeProject.code);
-        const normalized = mapProjectFromApi(refreshed);
-        setActiveProject(normalized);
-        setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+        await refreshActiveProject();
     } catch (err) {
         alert(err.message || "Impossible d'enregistrer le remboursement");
         return;
     }
   };
-
-  const toggleInvolved = (name) => {
-    const list = newExpense.involved;
-    const isSelected = list.includes(name);
-    const updatedShares = { ...(newExpense.shares || {}) };
-    let updatedList;
-    if (isSelected) {
-        updatedList = list.filter(n => n !== name);
-        delete updatedShares[name];
-    } else {
-        updatedList = [...list, name];
-        if (newExpense.customSplit) {
-            updatedShares[name] = updatedShares[name] || 1;
-        }
-    }
-    setNewExpense({ 
-        ...newExpense, 
-        involved: updatedList,
-        shares: newExpense.customSplit ? updatedShares : {}
-    });
-  };
-
-  // --- COMPUTED ---
-  const { balances, transactions } = useMemo(() => {
-      if(!activeProject) return { balances: {}, transactions: [] };
-      return calculateDebts(activeProject.expenses, activeProject.members);
+// --- COMPUTED ---
+  const expenseFlows = useMemo(() => {
+      if (!activeProject) return [];
+      const legacy = activeProject.expenses || [];
+      const subFlows = [];
+      (activeProject.subEvents || []).forEach(se => {
+          const contributors = (se.contributions || []).filter(c => c.amount > 0);
+          if (contributors.length === 0) return;
+          const shares = {};
+          contributors.forEach(c => { shares[c.member] = c.amount; });
+          const involved = contributors.map(c => c.member);
+          (se.items || []).forEach(item => {
+              const amount = parseFloat(item.amount) || 0;
+              if (!item.title || amount <= 0) return;
+              subFlows.push({
+                  id: `${se.id}-${item.id}`,
+                  type: 'expense',
+                  title: `${se.title} - ${item.title}`,
+                  amount,
+                  payer: se.buyer,
+                  beneficiary: se.beneficiary || '',
+                  involved,
+                  shares,
+                  isBought: item.isBought,
+                  subEventId: se.id,
+                  itemId: item.id,
+                  date: item.created_at || se.created_at
+              });
+          });
+      });
+      return [...legacy, ...subFlows];
   }, [activeProject]);
 
-  const baseVisibleExpenses = activeProject?.expenses.filter(e => 
-    e.type === 'settlement' || e.beneficiary !== currentUserMemberName
-  ) || [];
+  const { balances, transactions } = useMemo(() => {
+      if(!activeProject) return { balances: {}, transactions: [] };
+      return calculateDebts(expenseFlows, activeProject.members);
+  }, [activeProject, expenseFlows]);
 
-  const visibleExpenses = baseVisibleExpenses.filter(e => {
-    if (flowFilter === 'expense') return e.type === 'expense';
-    if (flowFilter === 'settlement') return e.type === 'settlement';
-    return true;
-  });
-  
-  const hiddenCount = (activeProject?.expenses.length || 0) - baseVisibleExpenses.length;
+  const hiddenSubEvents = (activeProject?.subEvents || []).filter(se => se.beneficiary === currentUserMemberName);
+  const visibleSubEvents = (activeProject?.subEvents || []).filter(se => se.beneficiary !== currentUserMemberName);
+  const settlements = (activeProject?.expenses || []).filter(e => e.type === 'settlement');
+  const legacyExpenses = (activeProject?.expenses || []).filter(e => e.type === 'expense');
+  const visibleLegacyExpenses = legacyExpenses.filter(e => e.beneficiary !== currentUserMemberName);
+  const hiddenCount = hiddenSubEvents.length + (legacyExpenses.length - visibleLegacyExpenses.length);
 
 
   // ==========================================
@@ -1014,7 +1068,7 @@ export default function App() {
         </button>
         <div className="relative -top-5">
             <button 
-                onClick={() => { setProjView('ADD'); setEditingId(null); setCustomInput({field:null, value:''}); setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [], shares: {}, customSplit: false }); }} 
+                onClick={() => { setProjView('ADD'); setEditingSubEventId(null); setCustomInput({field:null, value:''}); resetSubEventForm(); }} 
                 className="bg-red-600 text-white w-14 h-14 rounded-full shadow-lg shadow-red-200 flex items-center justify-center hover:scale-105 transition-transform"
             >
                 <Plus size={28} />
@@ -1038,7 +1092,7 @@ export default function App() {
                         <div className="bg-slate-800 text-white p-4 rounded-xl flex-1 min-w-[140px]">
                             <div className="text-slate-400 text-xs font-bold uppercase mb-1">Ma Balance</div>
                             <div className={`text-2xl font-bold ${balances[currentUserMemberName] >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {balances[currentUserMemberName]?.toFixed(0) || 0} €
+                                {balances[currentUserMemberName]?.toFixed(0) || 0} EUR
                             </div>
                         </div>
                         {hiddenCount > 0 && (
@@ -1046,123 +1100,161 @@ export default function App() {
                                 <div className="flex items-center gap-2 font-bold text-sm">
                                     <EyeOff size={16} /> Surprise
                                 </div>
-                                <div className="text-xs mt-1 leading-tight">{hiddenCount} cadeau(x) masqué(s).</div>
+                                <div className="text-xs mt-1 leading-tight">{hiddenCount} cadeau(x) masque(s).</div>
                             </div>
                         )}
                       </div>
 
-                      <div className="space-y-3">
+                      <div className="space-y-4">
                           <div className="flex items-center justify-between gap-3 flex-wrap">
-                              <h2 className="font-bold text-slate-700">Flux du projet</h2>
+                              <h2 className="font-bold text-slate-700">Budgets cadeaux</h2>
                               <div className="bg-white border border-slate-200 rounded-full p-1 flex text-[11px] font-bold uppercase tracking-wide">
                                   <button onClick={() => setFlowFilter('all')} className={`px-3 py-1 rounded-full ${flowFilter === 'all' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Global</button>
-                                  <button onClick={() => setFlowFilter('expense')} className={`px-3 py-1 rounded-full ${flowFilter === 'expense' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Achats</button>
+                                  <button onClick={() => setFlowFilter('sub')} className={`px-3 py-1 rounded-full ${flowFilter === 'sub' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Sous-evenements</button>
                                   <button onClick={() => setFlowFilter('settlement')} className={`px-3 py-1 rounded-full ${flowFilter === 'settlement' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Remboursements</button>
                               </div>
                           </div>
-                          {visibleExpenses.length === 0 ? (
-                              <div className="text-center py-12 bg-white rounded-xl border border-dashed border-slate-200 text-slate-400">
-                                  <p>Aucune dépense visible.</p>
-                              </div>
-                          ) : visibleExpenses.map(item => (
-                              <Card key={item.id} className="p-4 flex flex-col gap-3 group">
-                                  <div className="flex justify-between items-start">
-                                      <div className="flex items-center gap-3">
-                                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm ${item.type === 'settlement' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
-                                              {item.payer.charAt(0)}
-                                          </div>
-                                          <div>
-                                              <div className={`font-bold text-slate-800 ${item.isBought ? 'line-through text-slate-400' : ''}`}>{item.title || 'Remboursement'}</div>
-                                              <div className="text-xs text-slate-500">
-                                                  {item.payer} {item.type === 'settlement' ? <span className="text-emerald-600">➔ {item.receiver}</span> : <span>pour <span className="text-purple-600 font-bold">{item.beneficiary}</span></span>}
-                                              </div>
-                                          </div>
-                                      </div>
-                                      <div className="flex flex-col items-end gap-1">
-                                          <div className="font-bold text-slate-800">{item.amount} €</div>
-                                          {item.type === 'expense' && item.payer === currentUserMemberName && (
-                                              <button onClick={() => handleEdit(item)} className="text-slate-300 hover:text-red-500 p-1"><Pencil size={14} /></button>
-                                          )}
-                                      </div>
+
+                          {(flowFilter === 'all' || flowFilter === 'sub') && (
+                              visibleSubEvents.length === 0 ? (
+                                  <div className="text-center py-12 bg-white rounded-xl border border-dashed border-slate-200 text-slate-400">
+                                      <p>Aucun sous-evenement visible.</p>
                                   </div>
-                                  {item.type === 'expense' && (
-                                      <div className="pt-3 border-t border-slate-100 flex justify-between items-center">
-                                          <button onClick={() => toggleBought(item.id)} className={`text-xs flex items-center gap-1.5 font-medium px-2 py-1 rounded transition-colors ${item.isBought ? 'text-emerald-600 bg-emerald-50' : 'text-slate-500 hover:bg-slate-100'}`}>
-                                              <CheckCircle size={14} /> {item.isBought ? 'Acheté' : 'Marquer acheté'}
-                                          </button>
-                                          <div className="flex items-center gap-2">
-                                              <span className="text-[10px] text-slate-400">Réparti sur :</span>
-                                              <div className="flex -space-x-1">
-                                                  {item.involved?.slice(0, 3).map((u, i) => (
-                                                      <div key={i} className="w-5 h-5 rounded-full bg-slate-200 border-2 border-white text-[9px] flex items-center justify-center text-slate-600" title={u}>{u.charAt(0)}</div>
-                                                  ))}
-                                                  {(item.involved?.length || 0) > 3 && <div className="w-5 h-5 rounded-full bg-slate-100 border-2 border-white text-[8px] flex items-center justify-center text-slate-500">+</div>}
+                              ) : visibleSubEvents.map(se => {
+                                  const totalBudget = (se.contributions || []).reduce((sum, c) => sum + (c.amount || 0), 0);
+                                  const spent = (se.items || []).reduce((sum, it) => sum + (parseFloat(it.amount) || 0), 0);
+                                  const remaining = totalBudget - spent;
+                                  return (
+                                      <Card key={se.id} className="p-4 flex flex-col gap-4 group">
+                                          <div className="flex justify-between items-start">
+                                              <div>
+                                                  <div className="font-bold text-slate-800">{se.title}</div>
+                                                  <div className="text-xs text-slate-500 mt-1">
+                                                      Pour <span className="text-purple-600 font-semibold">{se.beneficiary || '???'}</span> ? Acheteur : {se.buyer || '???'}
+                                                  </div>
+                                              </div>
+                                              <div className="flex items-center gap-2">
+                                                  <span className={`text-[11px] px-2 py-1 rounded-full font-bold ${remaining >= 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+                                                      Reste {remaining.toFixed(0)} EUR
+                                                  </span>
+                                                  <button onClick={() => startEditSubEvent(se)} className="text-slate-300 hover:text-red-500 p-1"><Pencil size={16} /></button>
                                               </div>
                                           </div>
+
+                                          <div className="grid grid-cols-3 gap-2 text-sm">
+                                              <div className="bg-slate-50 rounded-lg p-3">
+                                                  <div className="text-xs text-slate-500 uppercase font-bold">Budget</div>
+                                                  <div className="font-bold text-slate-800">{totalBudget.toFixed(0)} EUR</div>
+                                              </div>
+                                              <div className="bg-slate-50 rounded-lg p-3">
+                                                  <div className="text-xs text-slate-500 uppercase font-bold">Depense</div>
+                                                  <div className="font-bold text-slate-800">{spent.toFixed(0)} EUR</div>
+                                              </div>
+                                              <div className="bg-slate-50 rounded-lg p-3">
+                                                  <div className="text-xs text-slate-500 uppercase font-bold">Reste</div>
+                                                  <div className={`font-bold ${remaining >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{remaining.toFixed(0)} EUR</div>
+                                              </div>
+                                          </div>
+
+                                          <div>
+                                              <div className="text-xs font-bold text-slate-500 uppercase mb-2">Budgets par personne</div>
+                                              <div className="flex flex-wrap gap-2">
+                                                  {(se.contributions || []).map(c => (
+                                                      <span key={`${se.id}-${c.member}`} className="px-3 py-1 rounded-full text-xs font-bold bg-red-50 text-red-700 border border-red-100">{c.member} : {c.amount} EUR</span>
+                                                  ))}
+                                              </div>
+                                          </div>
+
+                                          <div className="pt-2 border-t border-slate-100 space-y-2">
+                                              <div className="flex items-center justify-between">
+                                                  <span className="text-xs font-bold text-slate-500 uppercase">Items</span>
+                                                  <button onClick={() => startEditSubEvent(se)} className="text-[11px] text-red-600 font-bold uppercase">Ajouter / modifier</button>
+                                              </div>
+                                              {(se.items || []).length === 0 ? (
+                                                  <div className="text-sm text-slate-400 bg-slate-50 p-3 rounded-lg">Pas encore d'item.</div>
+                                              ) : (se.items || []).map(item => (
+                                                  <div key={item.id} className="flex items-center justify-between bg-white border border-slate-100 rounded-lg p-3">
+                                                      <div className="flex items-center gap-3">
+                                                          <button onClick={() => toggleSubEventItem(se.id, item.id)} className={`w-6 h-6 rounded-full border ${item.isBought ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-slate-200 text-slate-400'}`}>
+                                                              <CheckCircle size={16} />
+                                                          </button>
+                                                          <div>
+                                                              <div className={`font-semibold ${item.isBought ? 'line-through text-slate-400' : 'text-slate-800'}`}>{item.title}</div>
+                                                              <div className="text-[11px] text-slate-400">Pris sur {se.title}</div>
+                                                          </div>
+                                                      </div>
+                                                      <div className="font-bold text-slate-800">{(parseFloat(item.amount) || 0).toFixed(0)} EUR</div>
+                                                  </div>
+                                              ))}
+                                          </div>
+                                      </Card>
+                                  );
+                              })
+                          )}
+
+                          {(flowFilter === 'all' || flowFilter === 'settlement') && (
+                              <Card className="p-4 space-y-3">
+                                  <div className="flex items-center justify-between">
+                                      <h3 className="text-sm font-bold text-slate-600 uppercase">Remboursements</h3>
+                                      <RefreshCw size={16} className="text-slate-300" />
+                                  </div>
+                                  {settlements.length === 0 ? (
+                                      <div className="text-sm text-slate-400 py-4">Aucun remboursement pour le moment.</div>
+                                  ) : settlements.map(item => (
+                                      <div key={item.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-lg p-3">
+                                          <div>
+                                              <div className="font-semibold text-slate-800">{item.payer} ? {item.receiver}</div>
+                                              <div className="text-[11px] text-slate-400">Virement</div>
+                                          </div>
+                                          <div className="font-bold text-slate-800">{item.amount} EUR</div>
                                       </div>
-                                  )}
+                                  ))}
                               </Card>
-                          ))}
+                          )}
+
+                          {visibleLegacyExpenses.length > 0 && (
+                              <Card className="p-4 space-y-2">
+                                  <div className="text-xs font-bold uppercase text-slate-500">Achats historiques</div>
+                                  {visibleLegacyExpenses.map(item => (
+                                      <div key={item.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-lg p-3">
+                                          <div>
+                                              <div className="font-semibold text-slate-800">{item.title}</div>
+                                              <div className="text-[11px] text-slate-400">{item.payer} pour {item.beneficiary}</div>
+                                          </div>
+                                          <div className="font-bold text-slate-800">{item.amount} EUR</div>
+                                      </div>
+                                  ))}
+                              </Card>
+                          )}
                       </div>
                   </div>
               )}
-
-              {/* --- PROJECT VIEW: ADD/EDIT --- */}
+{/* --- PROJECT VIEW: ADD/EDIT --- */}
               {projView === 'ADD' && (
                   <div className="animate-in slide-in-from-bottom-4">
                       <div className="flex items-center gap-2 mb-4">
-                          <button onClick={() => { setProjView('LIST'); setEditingId(null); }} className="p-2 rounded-full hover:bg-slate-100">
+                          <button onClick={() => { setProjView('LIST'); resetSubEventForm(); }} className="p-2 rounded-full hover:bg-slate-100">
                               <ArrowLeft className="w-5 h-5 text-slate-500" />
                           </button>
-                          <h2 className="text-xl font-bold">{editingId ? 'Modifier' : 'Ajouter'}</h2>
+                          <h2 className="text-xl font-bold">{editingSubEventId ? 'Modifier un sous-evenement' : 'Nouveau sous-evenement'}</h2>
                       </div>
                       <Card className="p-5 space-y-6">
-                        {/* QUOI & COMBIEN */}
-                        <div className="grid grid-cols-3 gap-4">
-                            <div className="col-span-2">
-                                <label className="text-xs font-bold text-slate-400 uppercase">Description</label>
-                                <input type="text" placeholder="Ex: Console" className="w-full text-lg border-b border-slate-200 py-2 outline-none" value={newExpense.title} onChange={e => setNewExpense({...newExpense, title: e.target.value})} />
-                            </div>
-                            <div className="col-span-1">
-                                <label className="text-xs font-bold text-slate-400 uppercase">Prix (€)</label>
-                                <input type="number" placeholder="0" className="w-full text-lg border-b border-slate-200 py-2 outline-none" value={newExpense.amount} onChange={e => setNewExpense({...newExpense, amount: e.target.value})} />
-                            </div>
-                        </div>
-
-                        {/* QUI & POUR QUI */}
                         <div className="grid grid-cols-2 gap-4">
                             <div>
-                                <label className="text-xs font-bold text-slate-400 uppercase">Payé par</label>
-                                {customInput.field === 'payer' ? (
-                                    <div className="flex items-center gap-1 border-b border-red-300 py-2">
-                                        <input type="text" className="w-full text-sm outline-none text-red-700 font-medium bg-transparent" value={customInput.value} onChange={e => setCustomInput({...customInput, value: e.target.value})} autoFocus placeholder="Nom..." />
-                                        <button onClick={() => confirmCustomMember('payer')} className="bg-red-600 text-white rounded-full p-1"><Check size={12}/></button>
-                                    </div>
-                                ) : (
-                                    <select className="w-full text-lg border-b border-slate-200 py-2 outline-none bg-transparent" value={newExpense.payer} onChange={e => {
-                                        if(e.target.value==='__NEW__') { setCustomInput({field:'payer', value:''}); setNewExpense({...newExpense, payer:''}); }
-                                        else { setNewExpense({...newExpense, payer: e.target.value}); }
-                                    }}>
-                                        {activeProject.members.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
-                                        <option value="__NEW__" className="text-red-600 font-bold">+ Nouveau...</option>
-                                    </select>
-                                )}
+                                <label className="text-xs font-bold text-slate-400 uppercase">Titre</label>
+                                <input type="text" placeholder="Ex: Noel Papa" className="w-full text-lg border-b border-slate-200 py-2 outline-none" value={subEventForm.title} onChange={e => setSubEventForm({...subEventForm, title: e.target.value})} />
                             </div>
                             <div>
-                                <label className="text-xs font-bold text-slate-400 uppercase">Pour qui ?</label>
+                                <label className="text-xs font-bold text-slate-400 uppercase">Destinataire</label>
                                 {customInput.field === 'beneficiary' ? (
                                     <div className="flex items-center gap-1 border-b border-red-300 py-2">
                                         <input type="text" className="w-full text-sm outline-none text-red-700 font-medium bg-transparent" value={customInput.value} onChange={e => setCustomInput({...customInput, value: e.target.value})} autoFocus placeholder="Nom..." />
                                         <button onClick={() => confirmCustomMember('beneficiary')} className="bg-red-600 text-white rounded-full p-1"><Check size={12}/></button>
                                     </div>
                                 ) : (
-                                    <select className="w-full text-lg border-b border-slate-200 py-2 outline-none bg-transparent" value={newExpense.beneficiary} onChange={e => {
-                                        if(e.target.value==='__NEW__') { setCustomInput({field:'beneficiary', value:''}); setNewExpense({...newExpense, beneficiary:''}); }
-                                        else { 
-                                            const defaultInvolved = activeProject.members.filter(m => m.name !== e.target.value).map(m => m.name);
-                                            const defaultShares = newExpense.customSplit ? Object.fromEntries(defaultInvolved.map(n => [n, newExpense.shares?.[n] || 1])) : {};
-                                            setNewExpense({...newExpense, beneficiary: e.target.value, involved: defaultInvolved, shares: defaultShares}); 
-                                        }
+                                    <select className="w-full text-lg border-b border-slate-200 py-2 outline-none bg-transparent" value={subEventForm.beneficiary} onChange={e => {
+                                        if(e.target.value==='__NEW__') { setCustomInput({field:'beneficiary', value:''}); setSubEventForm({...subEventForm, beneficiary:''}); }
+                                        else { setSubEventForm({...subEventForm, beneficiary: e.target.value, contributions: prepareContributionMap(e.target.value, subEventForm.contributions)}); }
                                     }}>
                                         <option value="">Choisir...</option>
                                         {activeProject.members.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
@@ -1172,71 +1264,114 @@ export default function App() {
                             </div>
                         </div>
 
-                        {/* SPLIT */}
-                        {(newExpense.beneficiary && customInput.field !== 'beneficiary') && (
-                            <div className="bg-slate-50 p-4 rounded-lg">
-                                <div className="flex justify-between items-center mb-3">
-                                    <label className="text-xs font-bold text-slate-500 uppercase flex items-center gap-1"><Users size={12} /> Qui participe ?</label>
-                                    <div className="flex items-center gap-2">
-                                        <button 
-                                            onClick={() => {
-                                                setNewExpense(prev => {
-                                                    if (prev.customSplit) return { ...prev, customSplit: false, shares: {} };
-                                                    const shares = {};
-                                                    prev.involved.forEach(n => { shares[n] = prev.shares?.[n] || 1; });
-                                                    return { ...prev, customSplit: true, shares };
-                                                });
-                                            }} 
-                                            className={`text-[11px] px-3 py-1 rounded-full border ${newExpense.customSplit ? 'bg-red-600 text-white border-red-600' : 'bg-white text-slate-500 border-slate-200'}`}
-                                        >
-                                            {newExpense.customSplit ? 'Repartition perso' : 'Repartition egale'}
-                                        </button>
-                                        <span className="text-xs text-red-500 font-medium">{newExpense.involved.length} pers.</span>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs font-bold text-slate-400 uppercase">Acheteur</label>
+                                {customInput.field === 'buyer' ? (
+                                    <div className="flex items-center gap-1 border-b border-red-300 py-2">
+                                        <input type="text" className="w-full text-sm outline-none text-red-700 font-medium bg-transparent" value={customInput.value} onChange={e => setCustomInput({...customInput, value: e.target.value})} autoFocus placeholder="Nom..." />
+                                        <button onClick={() => confirmCustomMember('buyer')} className="bg-red-600 text-white rounded-full p-1"><Check size={12}/></button>
+                                    </div>
+                                ) : (
+                                    <select className="w-full text-lg border-b border-slate-200 py-2 outline-none bg-transparent" value={subEventForm.buyer} onChange={e => {
+                                        if(e.target.value==='__NEW__') { setCustomInput({field:'buyer', value:''}); setSubEventForm({...subEventForm, buyer:''}); }
+                                        else { setSubEventForm({...subEventForm, buyer: e.target.value}); }
+                                    }}>
+                                        <option value="">Choisir...</option>
+                                        {activeProject.members.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
+                                        <option value="__NEW__" className="text-red-600 font-bold">+ Nouveau...</option>
+                                    </select>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-slate-400 uppercase flex items-center gap-1"><Users size={12} /> Budget par personne</label>
+                                {customInput.field === 'contributor' ? (
+                                    <div className="flex items-center gap-1">
+                                        <input type="text" className="border px-2 py-1 rounded text-sm" value={customInput.value} onChange={e => setCustomInput({...customInput, value: e.target.value})} placeholder="Nom..." />
+                                        <button onClick={() => confirmCustomMember('contributor')} className="bg-red-600 text-white rounded px-2 py-1 text-xs font-bold">OK</button>
+                                    </div>
+                                ) : (
+                                    <button onClick={() => setCustomInput({ field:'contributor', value:'' })} className="text-xs text-red-600 font-bold uppercase">+ Ajouter</button>
+                                )}
+                            </div>
+                            <div className="space-y-2">
+                                {activeProject.members
+                                    .filter(m => m.name !== subEventForm.beneficiary)
+                                    .map(m => (
+                                        <div key={m.name} className="flex items-center gap-3 bg-white border border-slate-100 rounded-lg px-3 py-2">
+                                            <span className="flex-1 text-sm font-semibold text-slate-700">{m.name}</span>
+                                            <input 
+                                                type="number" 
+                                                min="0" 
+                                                step="1" 
+                                                className="w-24 text-sm border border-slate-200 rounded px-2 py-1" 
+                                                value={subEventForm.contributions?.[m.name] ?? ''} 
+                                                onChange={e => setSubEventForm(prev => ({ ...prev, contributions: { ...(prev.contributions || {}), [m.name]: e.target.value } }))} 
+                                            />
+                                        </div>
+                                    ))}
+                            </div>
+                        </div>
+
+                        {(() => {
+                            const budget = Object.values(subEventForm.contributions || {}).reduce((sum, val) => sum + (parseFloat(val) || 0), 0);
+                            const spent = (subEventForm.items || []).reduce((sum, it) => sum + (parseFloat(it.amount) || 0), 0);
+                            const remaining = budget - spent;
+                            return (
+                                <div className="bg-slate-50 border border-slate-100 rounded-xl p-4 grid grid-cols-3 gap-3 text-sm">
+                                    <div>
+                                        <div className="text-xs text-slate-500 uppercase font-bold">Budget</div>
+                                        <div className="font-bold text-slate-800">{budget.toFixed(0)} EUR</div>
+                                    </div>
+                                    <div>
+                                        <div className="text-xs text-slate-500 uppercase font-bold">Items</div>
+                                        <div className="font-bold text-slate-800">{spent.toFixed(0)} EUR</div>
+                                    </div>
+                                    <div>
+                                        <div className="text-xs text-slate-500 uppercase font-bold">Reste</div>
+                                        <div className={`font-bold ${remaining >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{remaining.toFixed(0)} EUR</div>
                                     </div>
                                 </div>
-                                <div className="flex flex-wrap gap-2 items-center">
-                                    {activeProject.members
-                                        .filter(m => m.name !== newExpense.beneficiary)
-                                        .map(m => (
-                                            <button key={m.name} onClick={() => toggleInvolved(m.name)} className={`px-3 py-1.5 rounded-full text-xs font-bold border transition-all ${newExpense.involved.includes(m.name) ? 'bg-red-600 text-white border-red-600' : 'bg-white text-slate-400 border-slate-200'}`}>
-                                                {m.name}
-                                            </button>
-                                        ))
-                                    }
-                                </div>
-                                {newExpense.customSplit && newExpense.involved.length > 0 && (() => {
-                                    const totalParts = newExpense.involved.reduce((sum, n) => {
-                                        const v = parseFloat(newExpense.shares?.[n]);
-                                        return sum + (isNaN(v) || v <= 0 ? 0 : v);
-                                    }, 0);
-                                    return (
-                                        <div className="mt-4 space-y-2">
-                                            <div className="text-xs font-bold text-slate-500 uppercase">Parts personnalisees</div>
-                                            {newExpense.involved.map(name => (
-                                                <div key={name} className="flex items-center gap-3 bg-white border border-slate-100 rounded-lg px-3 py-2">
-                                                    <span className="flex-1 text-sm font-semibold text-slate-700">{name}</span>
-                                                    <input 
-                                                        type="number" 
-                                                        min="0" 
-                                                        step="0.1" 
-                                                        className="w-20 text-sm border border-slate-200 rounded px-2 py-1" 
-                                                        value={newExpense.shares?.[name] ?? 1} 
-                                                        onChange={e => setNewExpense(prev => ({ ...prev, shares: { ...(prev.shares || {}), [name]: e.target.value } }))} 
-                                                    />
-                                                </div>
-                                            ))}
-                                            <div className="text-[11px] text-slate-400">Total des parts : {totalParts}</div>
-                                        </div>
-                                    );
-                                })()}
+                            );
+                        })()}
+
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                                <label className="text-xs font-bold text-slate-400 uppercase">Items du cadeau</label>
                             </div>
-                        )}
-                        <Button className="w-full py-4 text-lg" onClick={saveExpense} disabled={!newExpense.title || !newExpense.amount || !newExpense.beneficiary || customInput.field !== null}>Valider</Button>
+                            {(subEventForm.items || []).length > 0 && (
+                                <div className="space-y-2">
+                                    {subEventForm.items.map(item => (
+                                        <div key={item.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-lg p-3">
+                                            <div>
+                                                <div className="font-semibold text-slate-800">{item.title}</div>
+                                                <div className="text-[11px] text-slate-400">{(parseFloat(item.amount) || 0).toFixed(0)} EUR</div>
+                                            </div>
+                                            <button onClick={() => removeItemFromForm(item.id)} className="text-slate-300 hover:text-red-500 p-1"><X size={16} /></button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                            <div className="grid grid-cols-3 gap-3 items-end">
+                                <div className="col-span-2">
+                                    <label className="text-xs font-bold text-slate-400 uppercase">Item</label>
+                                    <input type="text" placeholder="Ex: BD, vinyle..." className="w-full text-lg border-b border-slate-200 py-2 outline-none" value={itemDraft.title} onChange={e => setItemDraft({...itemDraft, title: e.target.value})} />
+                                </div>
+                                <div>
+                                    <label className="text-xs font-bold text-slate-400 uppercase">Montant</label>
+                                    <input type="number" placeholder="0" className="w-full text-lg border-b border-slate-200 py-2 outline-none" value={itemDraft.amount} onChange={e => setItemDraft({...itemDraft, amount: e.target.value})} />
+                                </div>
+                            </div>
+                            <Button className="w-full" variant="secondary" onClick={addItemToForm} disabled={!itemDraft.title || !itemDraft.amount}>Ajouter l'item</Button>
+                        </div>
+                        <Button className="w-full py-4 text-lg" onClick={saveSubEvent} disabled={!subEventForm.title || !subEventForm.beneficiary || !subEventForm.buyer || customInput.field !== null}>Enregistrer</Button>
                       </Card>
                   </div>
               )}
-
-              {/* --- PROJECT VIEW: BALANCE --- */}
+{/* --- PROJECT VIEW: BALANCE --- */}
               {projView === 'BALANCE' && (
                   <div className="space-y-6 animate-in fade-in">
                         {/* DETTES */}

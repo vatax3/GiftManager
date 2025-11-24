@@ -40,6 +40,7 @@ class Project(Base):
     code = Column(String, primary_key=True, index=True)
     name = Column(String)
     members = relationship("ProjectMember", back_populates="project", cascade="all, delete-orphan")
+    sub_events = relationship("SubEvent", back_populates="project", cascade="all, delete-orphan")
     expenses = relationship("Expense", back_populates="project", cascade="all, delete-orphan")
 
 class ProjectMember(Base):
@@ -69,6 +70,20 @@ class Expense(Base):
 
     project = relationship("Project", back_populates="expenses")
 
+
+class SubEvent(Base):
+    __tablename__ = "sub_events"
+    id = Column(String, primary_key=True, index=True)
+    project_code = Column(String, ForeignKey("projects.code"))
+    title = Column(String)
+    beneficiary = Column(String, nullable=True)
+    buyer = Column(String)
+    contributions = Column(JSON, default=list)
+    items = Column(JSON, default=list)
+    created_at = Column(String)
+
+    project = relationship("Project", back_populates="sub_events")
+
 Base.metadata.create_all(bind=engine)
 
 # Lightweight migration to ensure new columns exist
@@ -77,6 +92,29 @@ expense_columns = [col["name"] for col in inspector.get_columns("expenses")]
 if "shares" not in expense_columns:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE expenses ADD COLUMN shares JSON"))
+
+# Ensure sub_events table/columns exist for existing databases
+subevent_table_names = inspector.get_table_names()
+if "sub_events" not in subevent_table_names:
+    with engine.begin() as conn:
+        SubEvent.__table__.create(bind=conn)
+else:
+    sub_cols = [col["name"] for col in inspector.get_columns("sub_events")]
+    new_columns = []
+    if "beneficiary" not in sub_cols:
+        new_columns.append("ALTER TABLE sub_events ADD COLUMN beneficiary STRING")
+    if "buyer" not in sub_cols:
+        new_columns.append("ALTER TABLE sub_events ADD COLUMN buyer STRING")
+    if "contributions" not in sub_cols:
+        new_columns.append("ALTER TABLE sub_events ADD COLUMN contributions JSON")
+    if "items" not in sub_cols:
+        new_columns.append("ALTER TABLE sub_events ADD COLUMN items JSON")
+    if "created_at" not in sub_cols:
+        new_columns.append("ALTER TABLE sub_events ADD COLUMN created_at STRING")
+    if new_columns:
+        with engine.begin() as conn:
+            for stmt in new_columns:
+                conn.execute(text(stmt))
 
 # --- SCHEMAS ---
 class UserLogin(BaseModel):
@@ -90,6 +128,25 @@ class PasswordReset(BaseModel):
 class ProjectCreate(BaseModel):
     name: str
     code: str
+
+class Contribution(BaseModel):
+    member: str
+    amount: float
+
+class SubItem(BaseModel):
+    id: str
+    title: str
+    amount: float
+    is_bought: bool = False
+
+class SubEventCreate(BaseModel):
+    id: str
+    title: str
+    beneficiary: Optional[str] = None
+    buyer: str
+    contributions: List[Contribution] = []
+    items: List[SubItem] = []
+    created_at: Optional[str] = None
 
 class ExpenseCreate(BaseModel):
     id: str
@@ -187,11 +244,25 @@ def get_project(code: str, db: Session = Depends(get_db)):
     if not proj:
         raise HTTPException(404, "Projet introuvable")
     
+    sub_events = [
+        {
+            "id": se.id,
+            "title": se.title,
+            "beneficiary": se.beneficiary,
+            "buyer": se.buyer,
+            "contributions": se.contributions or [],
+            "items": se.items or [],
+            "created_at": se.created_at,
+        }
+        for se in proj.sub_events
+    ]
+
     return {
         "code": proj.code,
         "name": proj.name,
         "members": [{"name": m.name, "linkedUserId": m.linked_user_id} for m in proj.members],
-        "expenses": proj.expenses
+        "expenses": proj.expenses,
+        "sub_events": sub_events
     }
 
 @app.post("/projects/{code}/join")
@@ -211,6 +282,33 @@ def join_project(code: str, link_data: MemberLink, user_id: str, db: Session = D
                 raise HTTPException(400, "Ce profil est déjà lié à quelqu'un d'autre")
             member.linked_user_id = user_id
     
+    db.commit()
+    return {"status": "ok"}
+
+
+@app.post("/projects/{code}/subevents")
+def save_sub_event(code: str, sub_event: SubEventCreate, db: Session = Depends(get_db)):
+    proj = db.query(Project).filter(Project.code == code).first()
+    if not proj:
+        raise HTTPException(404, "Projet introuvable")
+
+    existing = db.query(SubEvent).filter(SubEvent.id == sub_event.id).first()
+    payload = sub_event.dict()
+
+    if existing:
+        for key, value in payload.items():
+            setattr(existing, key, value)
+    else:
+        db.add(SubEvent(project_code=code, **payload))
+
+    involved_names = [sub_event.buyer] + [c.member for c in sub_event.contributions]
+    if sub_event.beneficiary:
+        involved_names.append(sub_event.beneficiary)
+
+    for name in set(involved_names):
+        if name and not db.query(ProjectMember).filter_by(project_code=code, name=name).first():
+            db.add(ProjectMember(project_code=code, name=name))
+
     db.commit()
     return {"status": "ok"}
 
@@ -240,7 +338,12 @@ def admin_stats(db: Session = Depends(get_db)):
     projs = db.query(Project).all()
     users = db.query(User).all()
     
-    proj_data = [{"code": p.code, "name": p.name, "memberCount": len(p.members), "expenseCount": len(p.expenses)} for p in projs]
+    proj_data = [{
+        "code": p.code,
+        "name": p.name,
+        "memberCount": len(p.members),
+        "expenseCount": len(p.expenses) + len(p.sub_events)
+    } for p in projs]
     user_data = [{"id": u.id, "username": u.username, "isAdmin": u.is_admin, "myProjectCodes": list(set([pm.project_code for pm in u.projects_link]))} for u in users]
 
     return {"projects": proj_data, "users": user_data}

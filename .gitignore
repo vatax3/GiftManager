@@ -1,0 +1,26 @@
+# Node / frontend
+node_modules
+dist
+.vite
+frontend/node_modules
+frontend/dist
+frontend/.env*
+
+# Python / backend
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv
+.env
+.env.*
+backend/data/
+backend/giftmanager.db
+*.db
+*.sqlite
+
+# OS / tools
+.DS_Store
+Thumbs.db
+*.log
+GiftManager.zip

@@ -1,4 +1,4 @@
-# GiftManager / SantaSplit
+# GiftManager 
 
 Simple gift/project expense tracker with a FastAPI backend (SQLite) and a React/Vite frontend bundled with Nginx.
 

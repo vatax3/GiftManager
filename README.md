@@ -7,6 +7,9 @@ Simple gift/project expense tracker with a FastAPI backend (SQLite) and a React/
 - `frontend/` – React/Vite single-page app. API base set via `VITE_API_URL` (defaults to `/api`, assuming the Nginx reverse proxy defined in the Docker image).
 - `docker-compose.yml` – Builds both images, wires Nginx to the backend on `/api`, and mounts a named volume for the SQLite data.
 
+## Admin Login 
+Default Admin login is admin/admin
+
 ## Running locally (no Docker)
 1) Backend:  
 ```bash

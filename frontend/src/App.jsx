@@ -538,7 +538,7 @@ export default function App() {
             <div className="bg-red-500 w-16 h-16 rounded-full flex items-center justify-center mx-auto text-white mb-4 shadow-lg shadow-red-500/50">
               <Gift size={32} />
             </div>
-            <h1 className="text-2xl font-bold text-slate-800">SantaSplit</h1>
+            <h1 className="text-2xl font-bold text-slate-800">GiftManager</h1>
             <p className="text-slate-500 text-sm">Gestion de cadeaux multi-projets</p>
           </div>
 

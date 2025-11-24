@@ -1,4 +1,5 @@
-const API_URL = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
+// Default to same-origin API (empty) so the SPA works when served by the backend.
+const API_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
 export const api = {
   // Auth

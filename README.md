@@ -4,8 +4,12 @@ Simple gift/project expense tracker with a FastAPI backend (SQLite) and a React/
 
 ## Structure
 - `backend/` – FastAPI app, SQLite DB path configurable with `SQLITE_PATH` (default `/app/data/giftmanager.db`).
-- `frontend/` – React/Vite single-page app. API base set via `VITE_API_URL` (defaults to `/api`, assuming the Nginx reverse proxy defined in the Docker image).
-- `docker-compose.yml` – Builds both images, wires Nginx to the backend on `/api`, and mounts a named volume for the SQLite data.
+- `frontend/` – React/Vite single-page app. API base set via `VITE_API_URL` (defaults to same-origin when served by the backend).
+- `Dockerfile` – Single image build: builds the frontend, copies the bundle into the backend image, and serves it from FastAPI.
+- `docker-compose.yml` – One service (`app`) that runs the bundled image and mounts a named volume for SQLite.
+
+## Admin Login 
+Default Admin login is admin/admin
 
 ## Running locally (no Docker)
 1) Backend:  
@@ -22,37 +26,34 @@ npm install
 VITE_API_URL=http://localhost:8000 npm run dev
 ```
 
-## Run with Docker Compose
+## Run with Docker Compose (single image)
 ```bash
 docker compose up --build -d
 ```
-- Frontend: http://localhost  
-- Backend: http://localhost:8000  
-- SQLite data is stored in the `backend_data` named volume (see `docker volume ls`).
+- App + API: http://localhost (served by FastAPI on port 8000, published to 80)
+- SQLite data is stored in the `app_data` named volume.
 
-## Building & publishing images
-1) Tag the images with your registry (Docker Hub or GHCR):  
+## Building & publishing the single image
+1) Log in to GHCR (example with a PAT that has `write:packages`):  
 ```bash
-docker build -t ghcr.io/<user>/giftmanager-backend:latest -f backend/Dockerfile backend
-docker build -t ghcr.io/<user>/giftmanager-frontend:latest --build-arg VITE_API_URL=/api -f frontend/Dockerfile frontend
+echo $GHCR_TOKEN | docker login ghcr.io -u <user> --password-stdin
 ```
-2) Push them:  
+2) Build and tag:  
 ```bash
-docker push ghcr.io/<user>/giftmanager-backend:latest
-docker push ghcr.io/<user>/giftmanager-frontend:latest
+docker build -t ghcr.io/<user>/giftmanager:latest .
 ```
-3) Update `docker-compose.yml` to point to those image tags (or override at runtime):  
+3) Push:  
 ```bash
-docker compose up -d
+docker push ghcr.io/<user>/giftmanager:latest
 ```
 
-### Deploy via Docker Compose using published images
-If you don’t want to build locally, change the `image` fields in `docker-compose.yml` to your pushed tags (backend and frontend) and run:
+### Deploy via Docker Compose using the published image
+Update `docker-compose.yml` `image:` value to your tag (e.g., `ghcr.io/<user>/giftmanager:latest`) if you changed it, then:
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
 ### Adjusting the API URL
-- Containerized default uses `/api` with Nginx proxying to the backend service (`backend:8000`).  
-- For external deployments without that proxy, rebuild the frontend with `--build-arg VITE_API_URL=https://your-backend-host`.
+- Default (empty) uses same-origin requests when the SPA is served by FastAPI.  
+- For external deployments where the API lives elsewhere, rebuild with `--build-arg VITE_API_URL=https://your-backend-host`.

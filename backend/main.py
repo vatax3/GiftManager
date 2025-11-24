@@ -2,6 +2,8 @@ import os
 import secrets
 
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
@@ -236,3 +238,26 @@ def reset_password(user_id: str, payload: PasswordReset, db: Session = Depends(g
     user.hashed_password = pwd_context.hash(payload.new_password)
     db.commit()
     return {"status": "updated"}
+
+# --- STATIC SPA (built frontend) ---
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(STATIC_DIR):
+    assets_dir = os.path.join(STATIC_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        # Serve built assets efficiently
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        """
+        Serve SPA index.html for client routes; serve direct files when present.
+        API routes remain matched first because they are declared above.
+        """
+        if STATIC_DIR and os.path.isdir(STATIC_DIR):
+            candidate = os.path.join(STATIC_DIR, full_path)
+            if os.path.isfile(candidate):
+                return FileResponse(candidate)
+            index_file = os.path.join(STATIC_DIR, "index.html")
+            if os.path.exists(index_file):
+                return FileResponse(index_file)
+        raise HTTPException(status_code=404, detail="Static assets not built")

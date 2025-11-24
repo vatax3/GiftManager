@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Gift, Plus, Users, Wallet, Eye, EyeOff, CheckCircle, LogOut, ArrowRight, UserCheck, Lock, UserPlus, KeyRound, Link as LinkIcon, Home, FolderPlus, LogIn, ArrowLeft, Pencil, X, Copy, BarChart3, Check, AlertCircle, RefreshCw, Shield, Trash2, RotateCcw, Save } from 'lucide-react';
+import { Gift, Plus, Users, Wallet, Eye, EyeOff, CheckCircle, LogOut, ArrowRight, UserCheck, Lock, UserPlus, KeyRound, Link as LinkIcon, Home, FolderPlus, LogIn, ArrowLeft, Pencil, X, Copy, Check, AlertCircle, RefreshCw, Shield, Trash2, RotateCcw, Save } from 'lucide-react';
 
 // --- UI COMPONENTS ---
 const Card = ({ children, className = "" }) => (
@@ -58,13 +58,25 @@ const calculateDebts = (expenses, members) => {
       balances[item.receiver] -= item.amount;
     } else {
       totalSpent[item.payer] += item.amount;
-      const validParticipants = (item.involved || []).filter(name => balances[name] !== undefined);
-      if (validParticipants.length > 0) {
-        const splitAmount = item.amount / validParticipants.length;
-        balances[item.payer] += item.amount;
-        validParticipants.forEach(userName => {
-          balances[userName] -= splitAmount;
+      const participants = (item.involved || []).filter(name => balances[name] !== undefined);
+      if (participants.length > 0) {
+        const rawShares = item.shares || {};
+        const normalizedShares = participants.map(name => {
+            const val = parseFloat(rawShares?.[name]);
+            return isNaN(val) || val <= 0 ? null : val;
         });
+        const hasCustom = normalizedShares.some(v => v !== null);
+        const totalWeight = hasCustom ? normalizedShares.reduce((sum, v) => sum + (v || 0), 0) : participants.length;
+        if (totalWeight > 0) {
+            balances[item.payer] += item.amount;
+            participants.forEach((userName, idx) => {
+                const weight = hasCustom ? (normalizedShares[idx] || 0) : 1;
+                if (weight > 0) {
+                    const splitAmount = item.amount * weight / totalWeight;
+                    balances[userName] -= splitAmount;
+                }
+            });
+        }
       }
     }
   });
@@ -196,12 +208,13 @@ export default function App() {
 
   // --- PROJECT INTERNAL STATE ---
   const [projView, setProjView] = useState('LIST'); 
-  const [newExpense, setNewExpense] = useState({ title: '', amount: '', payer: '', beneficiary: '', involved: [] });
+  const [newExpense, setNewExpense] = useState({ title: '', amount: '', payer: '', beneficiary: '', involved: [], shares: {}, customSplit: false });
   const [customInput, setCustomInput] = useState({ field: null, value: '' });
   const [isAddingInvolved, setIsAddingInvolved] = useState(false);
   const [newInvolvedName, setNewInvolvedName] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [newSettlement, setNewSettlement] = useState({ amount: '', receiver: '' });
+  const [flowFilter, setFlowFilter] = useState('all'); // all | expense | settlement
 
   // --- 1. AUTHENTICATION LOGIC ---
 
@@ -353,7 +366,7 @@ export default function App() {
           setCurrentUserMemberName(linkedMember.name);
           setView('PROJECT_HOME');
           setProjView('LIST');
-          setNewExpense(prev => ({...prev, payer: linkedMember.name}));
+          setNewExpense({ title: '', amount: '', payer: linkedMember.name, beneficiary: '', involved: [], shares: {}, customSplit: false });
       } else {
           setView('PROJECT_LINK');
       }
@@ -380,7 +393,7 @@ export default function App() {
       setCurrentUserMemberName(memberName);
       setView('PROJECT_HOME');
       setProjView('LIST');
-      setNewExpense(prev => ({...prev, payer: memberName}));
+      setNewExpense({ title: '', amount: '', payer: memberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
   };
 
   // --- 4. PROJECT INTERNAL LOGIC ---
@@ -411,6 +424,11 @@ export default function App() {
           if (field === 'beneficiary') {
                const defaultInvolved = activeProject.members.map(m => m.name).concat(name).filter(n => n !== name);
                newState.involved = defaultInvolved;
+               if (prev.customSplit) {
+                   const shares = {};
+                   defaultInvolved.forEach(n => { shares[n] = prev.shares?.[n] || 1; });
+                   newState.shares = shares;
+               }
           }
           return newState;
       });
@@ -429,6 +447,24 @@ export default function App() {
            .filter(m => m.name !== newExpense.beneficiary)
            .map(m => m.name);
       }
+
+      let sharesToSave = {};
+      if (newExpense.customSplit) {
+          const hasDefinedShares = newExpense.shares && Object.keys(newExpense.shares).length > 0;
+          if (!hasDefinedShares) {
+              involvedList.forEach(n => { sharesToSave[n] = 1; });
+          } else {
+              involvedList.forEach(n => {
+                  const val = parseFloat(newExpense.shares?.[n]);
+                  if (!isNaN(val) && val > 0) sharesToSave[n] = val;
+              });
+          }
+          const totalWeight = Object.values(sharesToSave).reduce((a, b) => a + b, 0);
+          if (!Object.keys(sharesToSave).length || totalWeight <= 0) {
+              alert("Merci de definir une repartition valide (parts > 0).");
+              return;
+          }
+      }
   
       const expenseData = {
         id: editingId || generateId(),
@@ -438,6 +474,7 @@ export default function App() {
         payer: newExpense.payer,
         beneficiary: newExpense.beneficiary,
         involved: involvedList,
+        shares: newExpense.customSplit ? sharesToSave : undefined,
         isBought: editingId ? activeProject.expenses.find(e => e.id === editingId)?.isBought : false,
         date: new Date().toISOString()
       };
@@ -451,7 +488,7 @@ export default function App() {
       DB.saveProject(updatedProject);
       setActiveProject(updatedProject);
       
-      setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [] });
+      setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
       setCustomInput({ field: null, value: '' });
       setEditingId(null);
       setProjView('LIST');
@@ -463,7 +500,9 @@ export default function App() {
         amount: expense.amount,
         payer: expense.payer,
         beneficiary: expense.beneficiary,
-        involved: expense.involved || []
+        involved: expense.involved || [],
+        shares: expense.shares || {},
+        customSplit: !!(expense.shares && Object.keys(expense.shares).length)
     });
     setEditingId(expense.id);
     setProjView('ADD');
@@ -508,23 +547,42 @@ export default function App() {
 
   const toggleInvolved = (name) => {
     const list = newExpense.involved;
+    const isSelected = list.includes(name);
+    const updatedShares = { ...(newExpense.shares || {}) };
+    let updatedList;
+    if (isSelected) {
+        updatedList = list.filter(n => n !== name);
+        delete updatedShares[name];
+    } else {
+        updatedList = [...list, name];
+        if (newExpense.customSplit) {
+            updatedShares[name] = updatedShares[name] || 1;
+        }
+    }
     setNewExpense({ 
         ...newExpense, 
-        involved: list.includes(name) ? list.filter(n => n !== name) : [...list, name] 
+        involved: updatedList,
+        shares: newExpense.customSplit ? updatedShares : {}
     });
   };
 
   // --- COMPUTED ---
-  const { balances, transactions, totalSpent } = useMemo(() => {
-      if(!activeProject) return { balances: {}, transactions: [], totalSpent: {} };
+  const { balances, transactions } = useMemo(() => {
+      if(!activeProject) return { balances: {}, transactions: [] };
       return calculateDebts(activeProject.expenses, activeProject.members);
   }, [activeProject]);
 
-  const visibleExpenses = activeProject?.expenses.filter(e => 
+  const baseVisibleExpenses = activeProject?.expenses.filter(e => 
     e.type === 'settlement' || e.beneficiary !== currentUserMemberName
   ) || [];
+
+  const visibleExpenses = baseVisibleExpenses.filter(e => {
+    if (flowFilter === 'expense') return e.type === 'expense';
+    if (flowFilter === 'settlement') return e.type === 'settlement';
+    return true;
+  });
   
-  const hiddenCount = (activeProject?.expenses.length || 0) - visibleExpenses.length;
+  const hiddenCount = (activeProject?.expenses.length || 0) - baseVisibleExpenses.length;
 
 
   // ==========================================
@@ -931,7 +989,7 @@ export default function App() {
         </button>
         <div className="relative -top-5">
             <button 
-                onClick={() => { setProjView('ADD'); setEditingId(null); setCustomInput({field:null, value:''}); setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [] }); }} 
+                onClick={() => { setProjView('ADD'); setEditingId(null); setCustomInput({field:null, value:''}); setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [], shares: {}, customSplit: false }); }} 
                 className="bg-red-600 text-white w-14 h-14 rounded-full shadow-lg shadow-red-200 flex items-center justify-center hover:scale-105 transition-transform"
             >
                 <Plus size={28} />
@@ -969,7 +1027,14 @@ export default function App() {
                       </div>
 
                       <div className="space-y-3">
-                          <h2 className="font-bold text-slate-700">Flux du projet</h2>
+                          <div className="flex items-center justify-between gap-3 flex-wrap">
+                              <h2 className="font-bold text-slate-700">Flux du projet</h2>
+                              <div className="bg-white border border-slate-200 rounded-full p-1 flex text-[11px] font-bold uppercase tracking-wide">
+                                  <button onClick={() => setFlowFilter('all')} className={`px-3 py-1 rounded-full ${flowFilter === 'all' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Global</button>
+                                  <button onClick={() => setFlowFilter('expense')} className={`px-3 py-1 rounded-full ${flowFilter === 'expense' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Achats</button>
+                                  <button onClick={() => setFlowFilter('settlement')} className={`px-3 py-1 rounded-full ${flowFilter === 'settlement' ? 'bg-red-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>Remboursements</button>
+                              </div>
+                          </div>
                           {visibleExpenses.length === 0 ? (
                               <div className="text-center py-12 bg-white rounded-xl border border-dashed border-slate-200 text-slate-400">
                                   <p>Aucune dépense visible.</p>
@@ -1070,7 +1135,8 @@ export default function App() {
                                         if(e.target.value==='__NEW__') { setCustomInput({field:'beneficiary', value:''}); setNewExpense({...newExpense, beneficiary:''}); }
                                         else { 
                                             const defaultInvolved = activeProject.members.filter(m => m.name !== e.target.value).map(m => m.name);
-                                            setNewExpense({...newExpense, beneficiary: e.target.value, involved: defaultInvolved}); 
+                                            const defaultShares = newExpense.customSplit ? Object.fromEntries(defaultInvolved.map(n => [n, newExpense.shares?.[n] || 1])) : {};
+                                            setNewExpense({...newExpense, beneficiary: e.target.value, involved: defaultInvolved, shares: defaultShares}); 
                                         }
                                     }}>
                                         <option value="">Choisir...</option>
@@ -1086,7 +1152,22 @@ export default function App() {
                             <div className="bg-slate-50 p-4 rounded-lg">
                                 <div className="flex justify-between items-center mb-3">
                                     <label className="text-xs font-bold text-slate-500 uppercase flex items-center gap-1"><Users size={12} /> Qui participe ?</label>
-                                    <span className="text-xs text-red-500 font-medium">{newExpense.involved.length} pers.</span>
+                                    <div className="flex items-center gap-2">
+                                        <button 
+                                            onClick={() => {
+                                                setNewExpense(prev => {
+                                                    if (prev.customSplit) return { ...prev, customSplit: false, shares: {} };
+                                                    const shares = {};
+                                                    prev.involved.forEach(n => { shares[n] = prev.shares?.[n] || 1; });
+                                                    return { ...prev, customSplit: true, shares };
+                                                });
+                                            }} 
+                                            className={`text-[11px] px-3 py-1 rounded-full border ${newExpense.customSplit ? 'bg-red-600 text-white border-red-600' : 'bg-white text-slate-500 border-slate-200'}`}
+                                        >
+                                            {newExpense.customSplit ? 'Repartition perso' : 'Repartition egale'}
+                                        </button>
+                                        <span className="text-xs text-red-500 font-medium">{newExpense.involved.length} pers.</span>
+                                    </div>
                                 </div>
                                 <div className="flex flex-wrap gap-2 items-center">
                                     {activeProject.members
@@ -1098,6 +1179,31 @@ export default function App() {
                                         ))
                                     }
                                 </div>
+                                {newExpense.customSplit && newExpense.involved.length > 0 && (() => {
+                                    const totalParts = newExpense.involved.reduce((sum, n) => {
+                                        const v = parseFloat(newExpense.shares?.[n]);
+                                        return sum + (isNaN(v) || v <= 0 ? 0 : v);
+                                    }, 0);
+                                    return (
+                                        <div className="mt-4 space-y-2">
+                                            <div className="text-xs font-bold text-slate-500 uppercase">Parts personnalisees</div>
+                                            {newExpense.involved.map(name => (
+                                                <div key={name} className="flex items-center gap-3 bg-white border border-slate-100 rounded-lg px-3 py-2">
+                                                    <span className="flex-1 text-sm font-semibold text-slate-700">{name}</span>
+                                                    <input 
+                                                        type="number" 
+                                                        min="0" 
+                                                        step="0.1" 
+                                                        className="w-20 text-sm border border-slate-200 rounded px-2 py-1" 
+                                                        value={newExpense.shares?.[name] ?? 1} 
+                                                        onChange={e => setNewExpense(prev => ({ ...prev, shares: { ...(prev.shares || {}), [name]: e.target.value } }))} 
+                                                    />
+                                                </div>
+                                            ))}
+                                            <div className="text-[11px] text-slate-400">Total des parts : {totalParts}</div>
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         )}
                         <Button className="w-full py-4 text-lg" onClick={saveExpense} disabled={!newExpense.title || !newExpense.amount || !newExpense.beneficiary || customInput.field !== null}>Valider</Button>
@@ -1108,26 +1214,7 @@ export default function App() {
               {/* --- PROJECT VIEW: BALANCE --- */}
               {projView === 'BALANCE' && (
                   <div className="space-y-6 animate-in fade-in">
-                      {/* STATS */}
-                      <div className="bg-white p-5 rounded-xl border border-slate-100 shadow-sm">
-                          <h3 className="font-bold text-slate-700 mb-4 text-sm flex items-center gap-2 uppercase tracking-wide"><BarChart3 size={16} /> Statistiques</h3>
-                          <div className="space-y-3">
-                              {Object.entries(totalSpent).sort(([,a], [,b]) => b - a).map(([name, amount]) => {
-                                  const max = Math.max(...Object.values(totalSpent), 1);
-                                  return (
-                                      <div key={name} className="flex items-center gap-3">
-                                          <div className="w-16 text-xs font-bold text-slate-600 truncate text-right">{name}</div>
-                                          <div className="flex-1 bg-slate-100 rounded-full h-2.5 overflow-hidden">
-                                              <div className="h-full bg-red-400 rounded-full" style={{ width: `${(amount / max) * 100}%` }}></div>
-                                          </div>
-                                          <div className="w-12 text-xs font-bold text-slate-800 text-right">{amount.toFixed(0)}€</div>
-                                      </div>
-                                  )
-                              })}
-                          </div>
-                      </div>
-                      
-                      {/* DETTES */}
+                        {/* DETTES */}
                       <div className="bg-slate-800 text-white p-6 rounded-2xl shadow-xl">
                           <div className="flex justify-between items-start mb-4">
                              <h2 className="text-slate-400 text-sm font-bold uppercase">Remboursements</h2>
@@ -1174,3 +1261,5 @@ export default function App() {
       </div>
   );
 }
+
+

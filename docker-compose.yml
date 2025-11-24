@@ -1,26 +1,14 @@
 services:
-  backend:
-    build: ./backend
-    image: giftmanager-backend:latest
-    ports:
-      - "8005:8000"
+  app:
+    build: .
+    image: ghcr.io/vatax3/giftmanager:latest
     environment:
       - SQLITE_PATH=/app/data/giftmanager.db
     volumes:
-      - backend_data:/app/data
-    restart: unless-stopped
-
-  frontend:
-    build:
-      context: ./frontend
-      args:
-        VITE_API_URL: /api
-    image: giftmanager-frontend:latest
+      - app_data:/app/data
     ports:
-      - "80:80"
-    depends_on:
-      - backend
+      - "80:8000"
     restart: unless-stopped
 
 volumes:
-  backend_data:
+  app_data:

@@ -1,0 +1,14 @@
+.git
+.gitignore
+node_modules
+frontend/node_modules
+frontend/dist
+backend/__pycache__
+backend/*.pyc
+backend/*.pyo
+backend/.venv
+backend/data
+backend/giftmanager.db
+.env
+.env.*
+GiftManager.zip

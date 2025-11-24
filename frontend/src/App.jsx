@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { api } from './api';
 import { Gift, Plus, Users, Wallet, Eye, EyeOff, CheckCircle, LogOut, ArrowRight, UserCheck, Lock, UserPlus, KeyRound, Link as LinkIcon, Home, FolderPlus, LogIn, ArrowLeft, Pencil, X, Copy, Check, AlertCircle, RefreshCw, Shield, Trash2, RotateCcw, Save } from 'lucide-react';
 
 // --- UI COMPONENTS ---
@@ -99,85 +100,31 @@ const calculateDebts = (expenses, members) => {
   return { balances, transactions, totalSpent };
 };
 
-// --- STORAGE MANAGERS ---
-const DB = {
-  getUsers: () => {
-      let users = JSON.parse(localStorage.getItem('gm_users') || '[]');
-      // INITIALISATION AUTO DE L'ADMIN PAR DEFAUT
-      if (!users.find(u => u.isAdmin)) {
-          const defaultAdmin = {
-              id: 'admin_default',
-              username: 'admin',
-              password: 'admin',
-              myProjectCodes: [],
-              isAdmin: true,
-              needsPasswordChange: true // Flag pour forcer le changement
-          };
-          users.push(defaultAdmin);
-          localStorage.setItem('gm_users', JSON.stringify(users));
-      }
-      return users;
-  },
-  saveUser: (user) => {
-    const users = DB.getUsers();
-    const existingIndex = users.findIndex(u => u.id === user.id);
-    if (existingIndex >= 0) users[existingIndex] = user;
-    else users.push(user);
-    localStorage.setItem('gm_users', JSON.stringify(users));
-  },
-  
-  // -- Admin Helpers --
-  getAllProjectsMeta: () => {
-      const projects = [];
-      for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key.startsWith('gm_proj_')) {
-              const proj = JSON.parse(localStorage.getItem(key));
-              if (proj) {
-                  projects.push({
-                      code: proj.code,
-                      name: proj.name,
-                      memberCount: proj.members.length,
-                      expenseCount: proj.expenses.length
-                  });
-              }
-          }
-      }
-      return projects;
-  },
+// --- API NORMALIZERS ---
+const mapUserFromApi = (payload) => ({
+  id: payload?.id,
+  username: payload?.username,
+  myProjectCodes: payload?.myProjectCodes || payload?.my_project_codes || [],
+  isAdmin: !!(payload?.is_admin ?? payload?.isAdmin)
+});
 
-  deleteProject: (code) => {
-      localStorage.removeItem(`gm_proj_${code}`);
-      const users = DB.getUsers();
-      const updatedUsers = users.map(u => ({
-          ...u,
-          myProjectCodes: u.myProjectCodes.filter(c => c !== code)
-      }));
-      localStorage.setItem('gm_users', JSON.stringify(updatedUsers));
-  },
-  
-  updateUserPassword: (userId, newPass) => {
-      const users = DB.getUsers();
-      const idx = users.findIndex(u => u.id === userId);
-      if (idx !== -1) {
-          users[idx].password = newPass;
-          localStorage.setItem('gm_users', JSON.stringify(users));
-      }
-  },
-
-  getProject: (code) => JSON.parse(localStorage.getItem(`gm_proj_${code}`) || 'null'),
-  saveProject: (project) => localStorage.setItem(`gm_proj_${project.code}`, JSON.stringify(project)),
-  createProject: (name, code) => {
-    const newProject = { 
-        id: generateId(), 
-        code, 
-        name, 
-        members: [], 
-        expenses: [] 
-    };
-    localStorage.setItem(`gm_proj_${code}`, JSON.stringify(newProject));
-    return newProject;
-  }
+const mapProjectFromApi = (proj) => {
+  if (!proj) return null;
+  return {
+    ...proj,
+    members: (proj.members || []).map(m => ({
+      name: m.name,
+      linkedUserId: m.linkedUserId ?? m.linked_user_id ?? null
+    })),
+    expenses: (proj.expenses || []).map(e => ({
+      ...e,
+      isBought: e.isBought ?? e.is_bought ?? false,
+      shares: e.shares,
+      involved: e.involved || [],
+      beneficiary: e.beneficiary || '',
+      receiver: e.receiver || null
+    }))
+  };
 };
 
 export default function App() {
@@ -185,6 +132,7 @@ export default function App() {
   const [globalUser, setGlobalUser] = useState(null); 
   const [isAdmin, setIsAdmin] = useState(false);
   const [view, setView] = useState('AUTH'); // AUTH | CHANGE_PASSWORD | DASHBOARD | ADMIN_DASHBOARD | PROJECT_LINK | PROJECT_HOME
+  const [projectsMeta, setProjectsMeta] = useState({});
 
   // --- PROJECT STATE ---
   const [activeProject, setActiveProject] = useState(null);
@@ -216,75 +164,84 @@ export default function App() {
   const [newSettlement, setNewSettlement] = useState({ amount: '', receiver: '' });
   const [flowFilter, setFlowFilter] = useState('all'); // all | expense | settlement
 
+  // --- DATA LOADING ---
+  useEffect(() => {
+      const loadProjectsMeta = async () => {
+          if (!globalUser?.myProjectCodes?.length) {
+              setProjectsMeta({});
+              return;
+          }
+          const entries = await Promise.all(
+              globalUser.myProjectCodes.map(async code => {
+                  try {
+                      const proj = await api.getProject(code);
+                      return [code, mapProjectFromApi(proj)];
+                  } catch (err) {
+                      console.error('Impossible de charger le projet', code, err);
+                      return null;
+                  }
+              })
+          );
+          const meta = {};
+          entries.forEach(item => {
+              if (item && item[1]) meta[item[0]] = item[1];
+          });
+          setProjectsMeta(meta);
+      };
+      loadProjectsMeta();
+  }, [globalUser?.id, globalUser?.myProjectCodes?.join(',')]);
+
   // --- 1. AUTHENTICATION LOGIC ---
 
-  const handleAuth = () => {
-    setAuthError('');
-    const users = DB.getUsers(); // Ceci déclenche l'init admin si besoin
-    
-    if (authMode === 'LOGIN') {
-      const userExists = users.find(u => normalize(u.username) === normalize(authForm.username));
-      
-      if (!userExists) {
-        setAuthError("Utilisateur inconnu.");
-        return;
-      }
-
-      if (userExists.password !== authForm.password) {
-        setAuthError("Mot de passe incorrect.");
-        return;
-      }
-
-      // SUCCES LOGIN
-      setGlobalUser(userExists);
-      setIsAdmin(!!userExists.isAdmin); // On set les droits ici
-
-      if (userExists.needsPasswordChange) {
-          // Redirection forcée pour sécuriser le compte admin par défaut
-          setChangePassForm({ newUsername: '', newPassword: '' });
-          setView('CHANGE_PASSWORD');
-      } else {
-          setView('DASHBOARD');
-      }
-      setAuthForm({ username: '', password: '' });
-
-    } else {
-      // REGISTER
-      if (users.find(u => normalize(u.username) === normalize(authForm.username))) {
-        setAuthError("Ce nom d'utilisateur est déjà pris.");
-        return;
-      }
-      const newUser = { 
-        id: generateId(), 
-        username: authForm.username, 
-        password: authForm.password, 
-        myProjectCodes: [] 
-      };
-      DB.saveUser(newUser);
-      setGlobalUser(newUser);
-      setIsAdmin(false);
-      setView('DASHBOARD');
-      setAuthForm({ username: '', password: '' });
+    const handleAuth = async () => {
+      setAuthError('');
+      try {
+          if (authMode === 'LOGIN') {
+              const res = await api.login(authForm.username, authForm.password);
+              const user = mapUserFromApi(res);
+              setGlobalUser(user);
+              setIsAdmin(user.isAdmin);
+              if (user.username === 'admin' && authForm.password === 'admin') {
+                  setChangePassForm({ newUsername: '', newPassword: '' });
+                  setView('CHANGE_PASSWORD');
+              } else {
+                  setView('DASHBOARD');
+              }
+              setAuthForm({ username: '', password: '' });
+          } else {
+              const res = await api.register(authForm.username, authForm.password);
+              const user = mapUserFromApi(res);
+              user.myProjectCodes = [];
+            setGlobalUser(user);
+            setIsAdmin(user.isAdmin);
+            setView('DASHBOARD');
+            setAuthForm({ username: '', password: '' });
+        }
+    } catch (err) {
+        setAuthError(err.message || "Erreur d'authentification");
     }
   };
 
-  const handleSecureAdminAccount = () => {
-      if (!changePassForm.newUsername || !changePassForm.newPassword) {
-          alert("Veuillez remplir tous les champs.");
-          return;
-      }
-      
-      const updatedUser = {
-          ...globalUser,
-          username: changePassForm.newUsername,
-          password: changePassForm.newPassword,
-          needsPasswordChange: false // Le compte est maintenant sécurisé
-      };
-      
-      DB.saveUser(updatedUser);
-      setGlobalUser(updatedUser);
-      setView('DASHBOARD');
-  };
+    const handleSecureAdminAccount = async () => {
+        if (!changePassForm.newUsername || !changePassForm.newPassword) {
+            alert("Veuillez remplir tous les champs.");
+            return;
+        }
+
+        try {
+            await api.updateUserPassword(globalUser.id, changePassForm.newPassword, changePassForm.newUsername);
+            const updatedUser = {
+                ...globalUser,
+                username: changePassForm.newUsername || globalUser.username,
+                needsPasswordChange: false
+            };
+            setGlobalUser(updatedUser);
+            setAuthForm({ username: '', password: '' });
+            setView('DASHBOARD');
+        } catch (err) {
+            alert(err.message || "Impossible de mettre à jour le compte admin");
+        }
+    };
 
   const logout = () => {
     setGlobalUser(null);
@@ -296,24 +253,42 @@ export default function App() {
   };
 
   // --- ADMIN ACTIONS ---
-  const loadAdminData = () => {
-      setAdminData({
-          projects: DB.getAllProjectsMeta(),
-          users: DB.getUsers()
-      });
+  const loadAdminData = async () => {
+      try {
+          const stats = await api.getAdminStats();
+          setAdminData({
+              projects: stats.projects || [],
+              users: (stats.users || []).map(u => ({
+                  ...u,
+                  isAdmin: !!(u.is_admin ?? u.isAdmin),
+                  myProjectCodes: u.myProjectCodes || u.my_project_codes || []
+              }))
+          });
+      } catch (err) {
+          alert("Impossible de charger les données admin");
+      }
   };
 
-  const deleteProjectAdmin = (code) => {
+  const deleteProjectAdmin = async (code) => {
       if(confirm(`Êtes-vous sûr de vouloir supprimer définitivement le projet ${code} ?`)) {
-          DB.deleteProject(code);
+          await api.deleteProject(code);
+          if (globalUser?.myProjectCodes?.includes(code)) {
+              const updatedUser = { ...globalUser, myProjectCodes: globalUser.myProjectCodes.filter(c => c !== code) };
+              setGlobalUser(updatedUser);
+          }
+          setProjectsMeta(prev => {
+              const next = { ...prev };
+              delete next[code];
+              return next;
+          });
           loadAdminData();
       }
   };
 
-  const resetUserPassword = (user) => {
+  const resetUserPassword = async (user) => {
       const newPass = prompt(`Nouveau mot de passe pour ${user.username}:`, "1234");
       if (newPass) {
-          DB.updateUserPassword(user.id, newPass);
+          await api.updateUserPassword(user.id, newPass);
           loadAdminData();
       }
   };
@@ -329,71 +304,84 @@ export default function App() {
       setDashForm(prev => ({ ...prev, code: generateProjectCode() }));
   };
 
-  const createProject = () => {
+  const createProject = async () => {
       if (!dashForm.name || !dashForm.code) return;
-      if (DB.getProject(dashForm.code)) { alert("Ce code existe déjà !"); return; }
-      
-      DB.createProject(dashForm.name, dashForm.code);
-      const updatedUser = { ...globalUser, myProjectCodes: [...globalUser.myProjectCodes, dashForm.code] };
-      DB.saveUser(updatedUser);
-      setGlobalUser(updatedUser);
-      setDashForm({ code: '', name: '' });
-      setDashAction(null);
-  };
-
-  const joinProject = () => {
-      if (!dashForm.code) return;
-      const project = DB.getProject(dashForm.code);
-      if (!project) { alert("Projet introuvable !"); return; }
-      
-      if (!globalUser.myProjectCodes.includes(dashForm.code)) {
-        const updatedUser = { ...globalUser, myProjectCodes: [...globalUser.myProjectCodes, dashForm.code] };
-        DB.saveUser(updatedUser);
-        setGlobalUser(updatedUser);
+      try {
+          await api.createProject(dashForm.name, dashForm.code);
+          await api.joinProject(dashForm.code, globalUser.username, true, globalUser.id);
+          const updatedUser = { 
+              ...globalUser, 
+              myProjectCodes: [...new Set([...(globalUser.myProjectCodes || []), dashForm.code])]
+          };
+          setGlobalUser(updatedUser);
+          const proj = await api.getProject(dashForm.code);
+          setProjectsMeta(prev => ({ ...prev, [dashForm.code]: mapProjectFromApi(proj) }));
+          setDashForm({ code: '', name: '' });
+          setDashAction(null);
+      } catch (err) {
+          alert(err.message || "Impossible de créer le projet");
       }
-      setDashForm({ code: '', name: '' });
-      setDashAction(null);
   };
 
-  const enterProject = (code) => {
-      const project = DB.getProject(code);
-      if(!project) return;
-      setActiveProject(project);
+  const joinProject = async () => {
+      if (!dashForm.code) return;
+      try {
+          const project = await api.getProject(dashForm.code);
+          if (!project) { alert("Projet introuvable !"); return; }
+          if (!globalUser.myProjectCodes?.includes(dashForm.code)) {
+            const updatedUser = { ...globalUser, myProjectCodes: [...(globalUser.myProjectCodes || []), dashForm.code] };
+            setGlobalUser(updatedUser);
+          }
+          setProjectsMeta(prev => ({ ...prev, [dashForm.code]: mapProjectFromApi(project) }));
+          setDashForm({ code: '', name: '' });
+          setDashAction(null);
+      } catch (err) {
+          alert("Projet introuvable !");
+      }
+  };
 
-      const linkedMember = project.members.find(m => m.linkedUserId === globalUser.id);
-      
-      if (linkedMember) {
-          setCurrentUserMemberName(linkedMember.name);
-          setView('PROJECT_HOME');
-          setProjView('LIST');
-          setNewExpense({ title: '', amount: '', payer: linkedMember.name, beneficiary: '', involved: [], shares: {}, customSplit: false });
-      } else {
-          setView('PROJECT_LINK');
+  const enterProject = async (code) => {
+      try {
+          const project = await api.getProject(code);
+          if(!project) return;
+          const normalizedProject = mapProjectFromApi(project);
+          setActiveProject(normalizedProject);
+
+          const linkedMember = (normalizedProject.members || []).find(m => m.linkedUserId === globalUser.id);
+          
+          if (linkedMember) {
+              setCurrentUserMemberName(linkedMember.name);
+              setView('PROJECT_HOME');
+              setProjView('LIST');
+              setNewExpense({ title: '', amount: '', payer: linkedMember.name, beneficiary: '', involved: [], shares: {}, customSplit: false });
+          } else {
+              setView('PROJECT_LINK');
+          }
+      } catch (err) {
+          alert("Impossible de charger ce projet");
       }
   };
 
   // --- 3. LINKING LOGIC ---
 
-  const linkMember = (memberName, createNew = false) => {
-      let updatedProject = { ...activeProject };
-      
-      if (createNew) {
-          if(updatedProject.members.find(m => normalize(m.name) === normalize(memberName))) {
-              alert("Ce nom existe déjà !"); return;
-          }
-          updatedProject.members.push({ name: memberName, linkedUserId: globalUser.id });
-      } else {
-          updatedProject.members = updatedProject.members.map(m => 
-             m.name === memberName ? { ...m, linkedUserId: globalUser.id } : m
-          );
+  const linkMember = async (memberName, createNew = false) => {
+      try {
+          await api.joinProject(activeProject.code, memberName, createNew, globalUser.id);
+          const refreshed = await api.getProject(activeProject.code);
+          const normalized = mapProjectFromApi(refreshed);
+          setActiveProject(normalized);
+          const updatedUser = globalUser.myProjectCodes?.includes(activeProject.code)
+            ? globalUser
+            : { ...globalUser, myProjectCodes: [...(globalUser.myProjectCodes || []), activeProject.code] };
+          setGlobalUser(updatedUser);
+          setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+          setCurrentUserMemberName(memberName);
+          setView('PROJECT_HOME');
+          setProjView('LIST');
+          setNewExpense({ title: '', amount: '', payer: memberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
+      } catch (err) {
+          alert(err.message || "Impossible de lier ce membre");
       }
-      
-      DB.saveProject(updatedProject);
-      setActiveProject(updatedProject);
-      setCurrentUserMemberName(memberName);
-      setView('PROJECT_HOME');
-      setProjView('LIST');
-      setNewExpense({ title: '', amount: '', payer: memberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
   };
 
   // --- 4. PROJECT INTERNAL LOGIC ---
@@ -408,8 +396,8 @@ export default function App() {
           ...activeProject,
           members: [...activeProject.members, { name: name, linkedUserId: null }]
       };
-      DB.saveProject(updatedProject);
       setActiveProject(updatedProject);
+      setProjectsMeta(prev => ({ ...prev, [activeProject.code]: updatedProject }));
       return name;
   };
 
@@ -436,7 +424,7 @@ export default function App() {
   };
 
 
-  const saveExpense = () => {
+  const saveExpense = async () => {
       if (!newExpense.title || !newExpense.amount || !newExpense.payer || !newExpense.beneficiary) return;
   
       let updatedProject = { ...activeProject };
@@ -479,14 +467,18 @@ export default function App() {
         date: new Date().toISOString()
       };
   
-      if (editingId) {
-          updatedProject.expenses = updatedProject.expenses.map(e => e.id === editingId ? expenseData : e);
-      } else {
-          updatedProject.expenses = [expenseData, ...updatedProject.expenses];
+      try {
+          const payload = { ...expenseData, is_bought: expenseData.isBought };
+          delete payload.isBought;
+          await api.saveExpense(activeProject.code, payload);
+          const refreshed = await api.getProject(activeProject.code);
+          const normalized = mapProjectFromApi(refreshed);
+          setActiveProject(normalized);
+          setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+      } catch (err) {
+          alert(err.message || "Impossible d'enregistrer la dépense");
+          return;
       }
-  
-      DB.saveProject(updatedProject);
-      setActiveProject(updatedProject);
       
       setNewExpense({ title: '', amount: '', payer: currentUserMemberName, beneficiary: '', involved: [], shares: {}, customSplit: false });
       setCustomInput({ field: null, value: '' });
@@ -511,11 +503,21 @@ export default function App() {
   const toggleBought = (id) => {
       const updatedProject = { ...activeProject };
       updatedProject.expenses = updatedProject.expenses.map(e => e.id === id ? { ...e, isBought: !e.isBought } : e);
-      DB.saveProject(updatedProject);
       setActiveProject(updatedProject);
+      const expense = updatedProject.expenses.find(e => e.id === id);
+      if (expense) {
+          const payload = { ...expense, is_bought: expense.isBought };
+          delete payload.isBought;
+          api.saveExpense(activeProject.code, payload).then(async () => {
+              const refreshed = await api.getProject(activeProject.code);
+              const normalized = mapProjectFromApi(refreshed);
+              setActiveProject(normalized);
+              setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+          }).catch(() => {});
+      }
   };
 
-  const addSettlement = () => {
+  const addSettlement = async () => {
     const settlement = {
       id: generateId(),
       type: 'settlement',
@@ -524,13 +526,21 @@ export default function App() {
       receiver: newSettlement.receiver,
       date: new Date().toISOString()
     };
-    const updatedProject = { ...activeProject, expenses: [settlement, ...activeProject.expenses] };
-    DB.saveProject(updatedProject);
-    setActiveProject(updatedProject);
+    try {
+        const payload = { ...settlement, is_bought: false };
+        await api.saveExpense(activeProject.code, payload);
+        const refreshed = await api.getProject(activeProject.code);
+        const normalized = mapProjectFromApi(refreshed);
+        setActiveProject(normalized);
+        setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+    } catch (err) {
+        alert(err.message || "Impossible d'ajouter le remboursement");
+        return;
+    }
     setNewSettlement({ amount: '', receiver: '' });
   };
 
-  const quickSettle = (from, to, amount) => {
+  const quickSettle = async (from, to, amount) => {
     if (!confirm(`Confirmer le remboursement de ${amount}€ ?`)) return;
     const settlement = {
       id: generateId(),
@@ -540,9 +550,17 @@ export default function App() {
       receiver: to,
       date: new Date().toISOString()
     };
-    const updatedProject = { ...activeProject, expenses: [settlement, ...activeProject.expenses] };
-    DB.saveProject(updatedProject);
-    setActiveProject(updatedProject);
+    try {
+        const payload = { ...settlement, is_bought: false };
+        await api.saveExpense(activeProject.code, payload);
+        const refreshed = await api.getProject(activeProject.code);
+        const normalized = mapProjectFromApi(refreshed);
+        setActiveProject(normalized);
+        setProjectsMeta(prev => ({ ...prev, [activeProject.code]: normalized }));
+    } catch (err) {
+        alert(err.message || "Impossible d'enregistrer le remboursement");
+        return;
+    }
   };
 
   const toggleInvolved = (name) => {
@@ -899,8 +917,15 @@ export default function App() {
                          </div>
                      ) : (
                          globalUser.myProjectCodes.map(code => {
-                             const proj = DB.getProject(code);
-                             if (!proj) return null;
+                             const proj = projectsMeta[code];
+                             if (!proj) return (
+                                 <div key={code} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center">
+                                     <div>
+                                         <div className="font-bold text-slate-800">Chargement...</div>
+                                         <div className="text-xs text-slate-400 font-mono bg-slate-100 px-1 rounded inline-block mt-1">{code}</div>
+                                     </div>
+                                 </div>
+                             );
                              return (
                                  <div key={code} onClick={() => enterProject(code)} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center cursor-pointer hover:border-red-200 transition-colors group">
                                      <div>

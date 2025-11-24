@@ -60,11 +60,15 @@ export const api = {
 
   // Expenses
   saveExpense: async (projectCode, expense) => {
-    await fetch(`${API_URL}/projects/${projectCode}/expenses`, {
+    const res = await fetch(`${API_URL}/projects/${projectCode}/expenses`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(expense)
     });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Erreur lors de la sauvegarde');
+    }
   },
 
   // Admin
@@ -74,14 +78,22 @@ export const api = {
   },
 
   deleteProject: async (code) => {
-      await fetch(`${API_URL}/admin/projects/${code}`, { method: 'DELETE' });
+      const res = await fetch(`${API_URL}/admin/projects/${code}`, { method: 'DELETE' });
+      if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || 'Erreur de suppression');
+      }
   },
 
-  updateUserPassword: async (userId, newPassword) => {
-      await fetch(`${API_URL}/admin/users/${userId}/password`, {
+  updateUserPassword: async (userId, newPassword, newUsername) => {
+      const res = await fetch(`${API_URL}/admin/users/${userId}/password`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ new_password: newPassword })
+          body: JSON.stringify({ new_password: newPassword, new_username: newUsername })
       });
+      if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.detail || 'Erreur de mise à jour');
+      }
   }
 };

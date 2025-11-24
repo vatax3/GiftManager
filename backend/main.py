@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, ForeignKey, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, ForeignKey, JSON, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from passlib.context import CryptContext
@@ -63,12 +63,20 @@ class Expense(Base):
     beneficiary = Column(String, nullable=True)
     receiver = Column(String, nullable=True)
     involved = Column(JSON)
+    shares = Column(JSON, nullable=True)
     is_bought = Column(Boolean, default=False)
     date = Column(String)
 
     project = relationship("Project", back_populates="expenses")
 
 Base.metadata.create_all(bind=engine)
+
+# Lightweight migration to ensure new columns exist
+inspector = inspect(engine)
+expense_columns = [col["name"] for col in inspector.get_columns("expenses")]
+if "shares" not in expense_columns:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE expenses ADD COLUMN shares JSON"))
 
 # --- SCHEMAS ---
 class UserLogin(BaseModel):
@@ -77,6 +85,7 @@ class UserLogin(BaseModel):
 
 class PasswordReset(BaseModel):
     new_password: str
+    new_username: Optional[str] = None
 
 class ProjectCreate(BaseModel):
     name: str
@@ -91,6 +100,7 @@ class ExpenseCreate(BaseModel):
     beneficiary: Optional[str] = None
     receiver: Optional[str] = None
     involved: List[str] = []
+    shares: Optional[dict] = None
     is_bought: bool = False
     date: str
 
@@ -101,6 +111,18 @@ class MemberLink(BaseModel):
 # --- UTILS ---
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 app = FastAPI()
+
+# Default admin bootstrap for fresh databases
+with SessionLocal() as bootstrap_db:
+    if bootstrap_db.query(User).count() == 0:
+        default_admin = User(
+            id=secrets.token_hex(8),
+            username="admin",
+            hashed_password=pwd_context.hash("admin"),
+            is_admin=True
+        )
+        bootstrap_db.add(default_admin)
+        bootstrap_db.commit()
 
 app.add_middleware(
     CORSMiddleware,
@@ -235,6 +257,10 @@ def delete_project(code: str, db: Session = Depends(get_db)):
 def reset_password(user_id: str, payload: PasswordReset, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user: raise HTTPException(404, "Utilisateur introuvable")
+    if payload.new_username:
+        if db.query(User).filter(User.username == payload.new_username, User.id != user_id).first():
+            raise HTTPException(400, "Nom d'utilisateur déjà pris")
+        user.username = payload.new_username
     user.hashed_password = pwd_context.hash(payload.new_password)
     db.commit()
     return {"status": "updated"}

@@ -1,4 +1,4 @@
-# GiftManager / SantaSplit
+# GiftManager 
 
 Simple gift/project expense tracker with a FastAPI backend (SQLite) and a React/Vite frontend bundled with Nginx.
 
@@ -7,6 +7,9 @@ Simple gift/project expense tracker with a FastAPI backend (SQLite) and a React/
 - `frontend/` – React/Vite single-page app. API base set via `VITE_API_URL` (defaults to same-origin when served by the backend).
 - `Dockerfile` – Single image build: builds the frontend, copies the bundle into the backend image, and serves it from FastAPI.
 - `docker-compose.yml` – One service (`app`) that runs the bundled image and mounts a named volume for SQLite.
+
+## Admin Login 
+Default Admin login is admin/admin
 
 ## Admin Login 
 Default Admin login is admin/admin

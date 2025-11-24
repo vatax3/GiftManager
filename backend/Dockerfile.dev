@@ -1,0 +1,11 @@
+# Use a Python base image
+FROM python:3.11-slim
+
+# Set the working directory
+WORKDIR /app
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# The command to run the app will be specified in the docker-compose.dev.yml

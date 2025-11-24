@@ -71,6 +71,18 @@ export const api = {
     }
   },
 
+  saveSubEvent: async (projectCode, subEvent) => {
+    const res = await fetch(`${API_URL}/projects/${projectCode}/subevents`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(subEvent)
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Erreur lors de la sauvegarde du sous-evenement');
+    }
+  },
+
   // Admin
   getAdminStats: async () => {
       const res = await fetch(`${API_URL}/admin/stats`);
@@ -93,7 +105,7 @@ export const api = {
       });
       if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          throw new Error(err.detail || 'Erreur de mise à jour');
+          throw new Error(err.detail || 'Erreur de mise a jour');
       }
   }
 };

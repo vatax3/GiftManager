@@ -9,10 +9,7 @@ Simple gift/project expense tracker with a FastAPI backend (SQLite) and a React/
 - `docker-compose.yml` – One service (`app`) that runs the bundled image and mounts a named volume for SQLite.
 
 ## Admin Login 
-Default Admin login is admin/admin
-
-## Admin Login 
-Default Admin login is admin/admin
+Default Admin login is admin/admin.
 
 ## Running locally (no Docker)
 1) Backend:  

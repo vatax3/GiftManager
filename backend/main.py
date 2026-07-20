@@ -1,19 +1,22 @@
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import create_engine, Column, Integer, String, Boolean, Float, ForeignKey, JSON, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
 from passlib.context import CryptContext
+from jose import jwt, JWTError
 
 # --- CONFIGURATION ---
-SECRET_KEY = "secret_key_a_changer_absolument"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 jours
 
 # --- DATABASE SETUP (SQLite) ---
 DB_FILE = os.getenv("SQLITE_PATH", "./data/giftmanager.db")
@@ -84,6 +87,11 @@ class SubEvent(Base):
 
     project = relationship("Project", back_populates="sub_events")
 
+class Setting(Base):
+    __tablename__ = "settings"
+    key = Column(String, primary_key=True)
+    value = Column(String)
+
 Base.metadata.create_all(bind=engine)
 
 # Lightweight migration to ensure new columns exist
@@ -115,6 +123,19 @@ else:
         with engine.begin() as conn:
             for stmt in new_columns:
                 conn.execute(text(stmt))
+
+# JWT signing secret: use SECRET_KEY env var if provided, otherwise persist a
+# generated one in the DB so tokens survive process restarts without extra config.
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    with SessionLocal() as _settings_db:
+        row = _settings_db.query(Setting).filter(Setting.key == "jwt_secret").first()
+        if row:
+            SECRET_KEY = row.value
+        else:
+            SECRET_KEY = secrets.token_hex(32)
+            _settings_db.add(Setting(key="jwt_secret", value=SECRET_KEY))
+            _settings_db.commit()
 
 # --- SCHEMAS ---
 class UserLogin(BaseModel):
@@ -184,7 +205,7 @@ with SessionLocal() as bootstrap_db:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -195,6 +216,34 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# --- AUTH ---
+bearer_scheme = HTTPBearer(auto_error=False)
+
+def create_access_token(user: User) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    payload = {"sub": user.id, "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentification requise")
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=["HS256"])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Session invalide ou expiree")
+    user = db.query(User).filter(User.id == payload.get("sub")).first()
+    if not user:
+        raise HTTPException(status_code=401, detail="Session invalide ou expiree")
+    return user
+
+def get_current_admin(user: User = Depends(get_current_user)) -> User:
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Acces reserve aux administrateurs")
+    return user
 
 # --- ENDPOINTS ---
 
@@ -213,24 +262,31 @@ def register(user: UserLogin, db: Session = Depends(get_db)):
     )
     db.add(new_user)
     db.commit()
-    return {"id": new_user.id, "username": new_user.username, "is_admin": new_user.is_admin}
+    return {
+        "id": new_user.id,
+        "username": new_user.username,
+        "is_admin": new_user.is_admin,
+        "myProjectCodes": [],
+        "access_token": create_access_token(new_user),
+    }
 
 @app.post("/auth/login")
 def login(user: UserLogin, db: Session = Depends(get_db)):
     db_user = db.query(User).filter(User.username == user.username).first()
     if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
         raise HTTPException(status_code=401, detail="Identifiants incorrects")
-    
+
     project_codes = [p.project_code for p in db_user.projects_link]
     return {
-        "id": db_user.id, 
-        "username": db_user.username, 
+        "id": db_user.id,
+        "username": db_user.username,
         "is_admin": db_user.is_admin,
-        "myProjectCodes": list(set(project_codes))
+        "myProjectCodes": list(set(project_codes)),
+        "access_token": create_access_token(db_user),
     }
 
 @app.post("/projects")
-def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
+def create_project(project: ProjectCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if db.query(Project).filter(Project.code == project.code).first():
         raise HTTPException(status_code=400, detail="Code projet déjà pris")
     new_proj = Project(code=project.code, name=project.name)
@@ -239,7 +295,7 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     return project
 
 @app.get("/projects/{code}")
-def get_project(code: str, db: Session = Depends(get_db)):
+def get_project(code: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     proj = db.query(Project).filter(Project.code == code).first()
     if not proj:
         raise HTTPException(404, "Projet introuvable")
@@ -266,9 +322,10 @@ def get_project(code: str, db: Session = Depends(get_db)):
     }
 
 @app.post("/projects/{code}/join")
-def join_project(code: str, link_data: MemberLink, user_id: str, db: Session = Depends(get_db)):
+def join_project(code: str, link_data: MemberLink, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     proj = db.query(Project).filter(Project.code == code).first()
     if not proj: raise HTTPException(404, "Projet introuvable")
+    user_id = current_user.id
 
     if link_data.create_new:
         if db.query(ProjectMember).filter_by(project_code=code, name=link_data.member_name).first():
@@ -281,13 +338,13 @@ def join_project(code: str, link_data: MemberLink, user_id: str, db: Session = D
             if member.linked_user_id and member.linked_user_id != user_id:
                 raise HTTPException(400, "Ce profil est déjà lié à quelqu'un d'autre")
             member.linked_user_id = user_id
-    
+
     db.commit()
     return {"status": "ok"}
 
 
 @app.post("/projects/{code}/subevents")
-def save_sub_event(code: str, sub_event: SubEventCreate, db: Session = Depends(get_db)):
+def save_sub_event(code: str, sub_event: SubEventCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     proj = db.query(Project).filter(Project.code == code).first()
     if not proj:
         raise HTTPException(404, "Projet introuvable")
@@ -313,7 +370,11 @@ def save_sub_event(code: str, sub_event: SubEventCreate, db: Session = Depends(g
     return {"status": "ok"}
 
 @app.post("/projects/{code}/expenses")
-def sync_expenses(code: str, expense: ExpenseCreate, db: Session = Depends(get_db)):
+def sync_expenses(code: str, expense: ExpenseCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    proj = db.query(Project).filter(Project.code == code).first()
+    if not proj:
+        raise HTTPException(404, "Projet introuvable")
+
     existing = db.query(Expense).filter(Expense.id == expense.id).first()
     if existing:
         for key, value in expense.dict().items():
@@ -334,7 +395,7 @@ def sync_expenses(code: str, expense: ExpenseCreate, db: Session = Depends(get_d
     return {"status": "ok"}
 
 @app.get("/admin/stats")
-def admin_stats(db: Session = Depends(get_db)):
+def admin_stats(db: Session = Depends(get_db), current_admin: User = Depends(get_current_admin)):
     projs = db.query(Project).all()
     users = db.query(User).all()
     
@@ -349,7 +410,7 @@ def admin_stats(db: Session = Depends(get_db)):
     return {"projects": proj_data, "users": user_data}
 
 @app.delete("/admin/projects/{code}")
-def delete_project(code: str, db: Session = Depends(get_db)):
+def delete_project(code: str, db: Session = Depends(get_db), current_admin: User = Depends(get_current_admin)):
     proj = db.query(Project).filter(Project.code == code).first()
     if not proj: raise HTTPException(404, "Projet introuvable")
     db.delete(proj)
@@ -357,7 +418,7 @@ def delete_project(code: str, db: Session = Depends(get_db)):
     return {"status": "deleted"}
 
 @app.put("/admin/users/{user_id}/password")
-def reset_password(user_id: str, payload: PasswordReset, db: Session = Depends(get_db)):
+def reset_password(user_id: str, payload: PasswordReset, db: Session = Depends(get_db), current_admin: User = Depends(get_current_admin)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user: raise HTTPException(404, "Utilisateur introuvable")
     if payload.new_username:

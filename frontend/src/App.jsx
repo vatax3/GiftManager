@@ -139,11 +139,35 @@ const mapProjectFromApi = (proj) => {
   };
 };
 
+// --- SESSION PERSISTENCE ---
+const SESSION_KEY = 'gm_user';
+
+const loadStoredUser = () => {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const persistUser = (user) => {
+  if (user) localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+  else localStorage.removeItem(SESSION_KEY);
+};
+
+// A stored user is only a valid session if we still have a token for it.
+const getInitialSession = () => {
+  const storedUser = loadStoredUser();
+  return storedUser && api.getToken() ? storedUser : null;
+};
+
 export default function App() {
   // --- GLOBAL STATE ---
-  const [globalUser, setGlobalUser] = useState(null); 
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [view, setView] = useState('AUTH'); // AUTH | CHANGE_PASSWORD | DASHBOARD | ADMIN_DASHBOARD | PROJECT_LINK | PROJECT_HOME
+  const storedSession = getInitialSession();
+  const [globalUser, setGlobalUser] = useState(storedSession);
+  const [isAdmin, setIsAdmin] = useState(!!storedSession?.isAdmin);
+  const [view, setView] = useState(storedSession ? 'DASHBOARD' : 'AUTH'); // AUTH | CHANGE_PASSWORD | DASHBOARD | ADMIN_DASHBOARD | PROJECT_LINK | PROJECT_HOME
   const [projectsMeta, setProjectsMeta] = useState({});
 
   // --- PROJECT STATE ---
@@ -210,6 +234,24 @@ export default function App() {
       });
   }, [currentUserMemberName]);
 
+  // Keep the persisted session in sync with whatever the user's state becomes,
+  // so a page reload doesn't silently log them out.
+  useEffect(() => {
+      persistUser(globalUser);
+  }, [globalUser]);
+
+  // If the backend rejects our token (expired/invalid), drop back to the login screen.
+  useEffect(() => {
+      api.setOnUnauthorized(() => {
+          setGlobalUser(null);
+          setIsAdmin(false);
+          setActiveProject(null);
+          setAuthForm({ username: '', password: '' });
+          setAuthError('Votre session a expiré, merci de vous reconnecter.');
+          setView('AUTH');
+      });
+  }, []);
+
   // --- 1. AUTHENTICATION LOGIC ---
 
     const handleAuth = async () => {
@@ -263,6 +305,7 @@ export default function App() {
     };
 
   const logout = () => {
+    api.setToken(null);
     setGlobalUser(null);
     setIsAdmin(false);
     setActiveProject(null);
@@ -327,7 +370,7 @@ export default function App() {
       if (!dashForm.name || !dashForm.code) return;
       try {
           await api.createProject(dashForm.name, dashForm.code);
-          await api.joinProject(dashForm.code, globalUser.username, true, globalUser.id);
+          await api.joinProject(dashForm.code, globalUser.username, true);
           const updatedUser = { 
               ...globalUser, 
               myProjectCodes: [...new Set([...(globalUser.myProjectCodes || []), dashForm.code])]
@@ -385,7 +428,7 @@ export default function App() {
 
   const linkMember = async (memberName, createNew = false) => {
       try {
-          await api.joinProject(activeProject.code, memberName, createNew, globalUser.id);
+          await api.joinProject(activeProject.code, memberName, createNew);
           const refreshed = await api.getProject(activeProject.code);
           const normalized = mapProjectFromApi(refreshed);
           setActiveProject(normalized);
@@ -1130,7 +1173,7 @@ export default function App() {
                                               <div>
                                                   <div className="font-bold text-slate-800">{se.title}</div>
                                                   <div className="text-xs text-slate-500 mt-1">
-                                                      Pour <span className="text-purple-600 font-semibold">{se.beneficiary || '???'}</span> ? Acheteur : {se.buyer || '???'}
+                                                      Pour <span className="text-purple-600 font-semibold">{se.beneficiary || '???'}</span> · Acheteur : {se.buyer || '???'}
                                                   </div>
                                               </div>
                                               <div className="flex items-center gap-2">
@@ -1203,7 +1246,7 @@ export default function App() {
                                   ) : settlements.map(item => (
                                       <div key={item.id} className="flex items-center justify-between bg-slate-50 border border-slate-100 rounded-lg p-3">
                                           <div>
-                                              <div className="font-semibold text-slate-800">{item.payer} ? {item.receiver}</div>
+                                              <div className="font-semibold text-slate-800 flex items-center gap-1">{item.payer} <ArrowRight size={14} className="text-slate-400" /> {item.receiver}</div>
                                               <div className="text-[11px] text-slate-400">Virement</div>
                                           </div>
                                           <div className="font-bold text-slate-800">{item.amount} EUR</div>
